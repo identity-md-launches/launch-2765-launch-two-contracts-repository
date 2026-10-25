@@ -9,6 +9,8 @@ export const metadata: Metadata = {
   description: "Conditionals in plain words: prediction markets that ask \"if X happens, will Y?\"",
 };
 
+const LIQUIDITY_PDF = "/docs/conditionals-v2-liquidity.pdf";
+
 type Page = { title: string; body: React.ReactNode };
 
 /** Each page stands on its own, so it can be shared as a single image. */
@@ -222,6 +224,13 @@ const PAGES: Page[] = [
           </li>
         </ul>
         <p>
+          How v2 does it is in the{" "}
+          <a href={LIQUIDITY_PDF} target="_blank" rel="noreferrer" className="text-ink underline decoration-line-2 underline-offset-4">
+            liquidity design
+          </a>
+          .
+        </p>
+        <p>
           Conditionals turns &ldquo;what if&rdquo; into a price. Try it at{" "}
           <Link href="/" className="text-ink underline decoration-line-2 underline-offset-4">
             conditionals-bay.vercel.app
@@ -276,6 +285,25 @@ export default function Docs() {
             );
           })}
         </div>
+
+        <section id="liquidity" className="panel mt-14 scroll-mt-24 p-7 sm:p-10">
+          <p className="eyebrow">Technical design · v2</p>
+          <h2 className="mt-4 font-display text-4xl leading-tight sm:text-5xl">Liquidity architecture</h2>
+          <div className="doc mt-5">
+            <p>
+              How v2 fixes liquidity: one IMD backs both worlds, an LMSR market maker quotes every market from the first
+              trade, and a shared vault funds markets with a capped, known worst-case loss.
+            </p>
+          </div>
+          <div className="mt-6 flex flex-wrap gap-3">
+            <a href={LIQUIDITY_PDF} target="_blank" rel="noreferrer" className="btn btn-primary text-sm">
+              Read the PDF
+            </a>
+            <a href={LIQUIDITY_PDF} download className="btn btn-ghost text-sm">
+              Download
+            </a>
+          </div>
+        </section>
 
         <div className="mt-14 flex flex-wrap gap-x-8 gap-y-3 text-sm text-ink-2">
           {ADDRESSES.conditionals && (
