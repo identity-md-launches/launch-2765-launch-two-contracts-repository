@@ -233,7 +233,7 @@ const PAGES: Page[] = [
         <p>
           Conditionals turns &ldquo;what if&rdquo; into a price. Try it at{" "}
           <Link href="/" className="text-ink underline decoration-line-2 underline-offset-4">
-            conditionals-bay.vercel.app
+            conditionals.xyz
           </Link>
           .
         </p>

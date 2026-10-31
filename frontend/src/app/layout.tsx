@@ -13,12 +13,14 @@ const sans = Geist({ variable: "--font-sans-face", subsets: ["latin"] });
 const mono = Geist_Mono({ variable: "--font-mono-face", subsets: ["latin"] });
 
 export const metadata: Metadata = {
+  metadataBase: new URL("https://conditionals.xyz"),
   title: "Conditionals · Trade the world where it happens",
   description:
     "Conditional prediction markets on IMD. Stake on what happens next in the world where an event occurs, and in the one where it doesn't. Settled by the IdentityMD oracle. Every fee burns IMD.",
   openGraph: {
     title: "Conditionals · Trade the world where it happens",
     description: "Two worlds. One outcome. Settled by IMD's oracle, on Robinhood Chain.",
+    url: "https://conditionals.xyz",
   },
 };
 
