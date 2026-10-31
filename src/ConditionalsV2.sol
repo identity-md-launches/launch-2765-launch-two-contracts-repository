@@ -426,6 +426,8 @@ contract ConditionalsV2 is Ownable2Step, ReentrancyGuard, EIP712, IOracleAttesta
         Market storage m = _tradable(marketId);
         if (outcome > 3) revert InvalidChoice();
         if (shares < MIN_TRADE) revert TradeTooSmall();
+        // int256(shares) would wrap above type(int256).max into a tiny sale credited as `shares` (review e665f90a).
+        if (shares > uint256(type(int256).max)) revert TradeTooLarge();
 
         (int256[4] memory q, uint256 c) = _quote(m.q, m.b, outcome, int256(shares));
         _checkSpread(q, m.b);
@@ -710,7 +712,8 @@ contract ConditionalsV2 is Ownable2Step, ReentrancyGuard, EIP712, IOracleAttesta
     {
         Market storage m = _market(marketId);
         if (question > 1) revert InvalidChoice();
-        return _questionDocument(marketId, m, question, windowBlock);
+        (string memory document,) = _documents(marketId, m, question, windowBlock);
+        return document;
     }
 
     // ---------------------------------------------------------------------------------------------------------------
@@ -770,14 +773,14 @@ contract ConditionalsV2 is Ownable2Step, ReentrancyGuard, EIP712, IOracleAttesta
         if (price > fromBudget) imd.safeTransferFrom(msg.sender, address(this), price - fromBudget);
         totalOracleSpend += price;
 
-        bytes32 questionHash = keccak256(bytes(_questionDocument(marketId, m, q, windowBlock)));
-        bytes memory body = bytes(_requestBody(marketId, m, q, windowBlock));
+        (string memory document, string memory body) = _documents(marketId, m, q, windowBlock);
+        bytes32 questionHash = keccak256(bytes(document));
 
         imd.forceApprove(address(config.intake), price);
         bytes32 requestId = config.intake
             .requestWithFailure(
                 config.action,
-                body,
+                bytes(body),
                 IIntake.Callback({target: address(this), selector: this.onOracleResult.selector}),
                 this.onFailure.selector,
                 address(imd),
@@ -834,10 +837,24 @@ contract ConditionalsV2 is Ownable2Step, ReentrancyGuard, EIP712, IOracleAttesta
     }
 
     function _payout(uint256 marketId, Market storage m, address account) internal view returns (uint256) {
-        if (m.status == Status.Settled) return _shares[marketId][account][m.winner];
+        uint256[4] storage held = _shares[marketId][account];
+        if (m.status == Status.Settled) return held[m.winner];
         uint256 net = _basisOf(marketId, account);
-        if (net == 0) return 0;
-        return FPM.fullMulDiv(net, m.refundPool, m.refundBase);
+        uint256 pool = m.refundPool;
+        uint256 base = m.refundBase;
+        if (pool == base) return net;
+        // Short (review bf61cff9): the market holds at least V, every position's value at the final prices, since
+        // makerBalance >= C(q) >= sum p_i q_i. Each account is paid between its value v and its cost: the shortfall
+        // falls on cost a position's value does not back, in proportion to it. The payouts sum to at most the pool.
+        uint256[4] memory p = _prices(m.q, m.b);
+        uint256 v;
+        uint256 total;
+        for (uint256 i; i < 4; ++i) {
+            v += FPM.mulWad(held[i], p[i]);
+            total += FPM.mulWadUp(uint256(m.q[i] + int256(m.sets)), p[i]);
+        }
+        if (total >= pool) return FPM.fullMulDiv(v, pool, total);
+        return (v * (base - pool) + net * (pool - total)) / (base - total);
     }
 
     function _basisOf(uint256 marketId, address account) internal view returns (uint256 total) {
@@ -1147,49 +1164,32 @@ contract ConditionalsV2 is Ownable2Step, ReentrancyGuard, EIP712, IOracleAttesta
     }
 
     /// @dev Canonical question document: compact JSON with sorted keys, as the oracle hashes it
-    ///      (https://imd.fun/docs/#intake-binding-an-answer-to-its-request). Text is restricted to printable ASCII
-    ///      without quotes or backslashes, so it needs no escaping. `chainId` is QUESTION_CHAIN_ID.
-    function _questionDocument(uint256 marketId, Market storage m, uint8 q, uint256 windowBlock)
+    ///      (https://imd.fun/docs/#intake-binding-an-answer-to-its-request), and the request body, which adds
+    ///      panelSize, quorum and validForSeconds in key order. Both are built from the same parts. Text is restricted
+    ///      to printable ASCII without quotes or backslashes, so it needs no escaping. `chainId` is QUESTION_CHAIN_ID.
+    function _documents(uint256 marketId, Market storage m, uint8 q, uint256 windowBlock)
         internal
         view
-        returns (string memory)
+        returns (string memory document, string memory body)
     {
-        return string.concat(
-            "{\"answerType\":\"bool\",\"chainId\":1,\"definitions\":",
-            _definitions(m),
-            ",\"evidence\":\"panel\",\"question\":\"",
-            _questionText(marketId, m, q),
-            "\",\"v\":1,\"window\":",
-            _window(windowBlock),
-            "}"
+        string memory head = string.concat(
+            "{\"answerType\":\"bool\",\"chainId\":1,\"definitions\":", _definitions(m), ",\"evidence\":\"panel\""
         );
-    }
-
-    function _requestBody(uint256 marketId, Market storage m, uint8 q, uint256 windowBlock)
-        internal
-        view
-        returns (string memory)
-    {
-        return string.concat(
-            "{\"answerType\":\"bool\",\"chainId\":1,\"definitions\":",
-            _definitions(m),
-            ",\"evidence\":\"panel\",\"panelSize\":",
+        string memory question = string.concat(",\"question\":\"", _questionText(marketId, m, q), "\"");
+        string memory w = windowBlock.toString();
+        string memory tail = string.concat(",\"window\":{\"fromBlock\":", w, ",\"toBlock\":", w, "}}");
+        document = string.concat(head, question, ",\"v\":1", tail);
+        body = string.concat(
+            head,
+            ",\"panelSize\":",
             uint256(m.oracle.panelSize).toString(),
-            ",\"question\":\"",
-            _questionText(marketId, m, q),
-            "\",\"quorum\":",
+            question,
+            ",\"quorum\":",
             uint256(m.oracle.quorum).toString(),
             ",\"v\":1,\"validForSeconds\":",
             VALID_FOR_SECONDS.toString(),
-            ",\"window\":",
-            _window(windowBlock),
-            "}"
+            tail
         );
-    }
-
-    function _window(uint256 windowBlock) internal pure returns (string memory) {
-        string memory b = windowBlock.toString();
-        return string.concat("{\"fromBlock\":", b, ",\"toBlock\":", b, "}");
     }
 
     /// @dev 1 to maxLength bytes of printable ASCII (0x20-0x7e) without `"` or `\`. Reports whether it has a space.

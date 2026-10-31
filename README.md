@@ -74,8 +74,13 @@ to the outcome: "if the Clarity Act passes, ETH above $5k is 62%; if it doesn't,
   market's snapshot price.
 - **Void refunds (ConditionalsV2).** The contract keeps, per account and outcome, what the shares still held cost: a
   buy adds its cost, a stake adds its collateral spread over the three outcomes it keeps by their prices, and a sell
-  or an exit releases the sold shares' share of it. A void refunds that sum (`netIn`), pro rata if the market cannot
-  cover it, and the creator takes what is left. What a sale fetched is the seller's, gain or loss: a loss one
+  or an exit releases the sold shares' share of it. A void refunds that sum (`netIn`) in full when the market can
+  cover it, and the creator takes what is left. When it is short, the shortfall is shared pro rata over the cost that
+  a position's value at the final prices does not back: an account with cost c and value v (shares times final
+  prices) is paid `(v * shortfall + c * (pool - V)) / (refundBase - V)`, where V is the value of every position.
+  The market always holds at least V (`makerBalance >= C(q) >= sum p_i q_i`), so a position worth its cost, such as
+  a stake's complete sets, is refunded in full, and cost paid at prices pumped on several outcomes at once, of which
+  only one can pay, takes the loss. What a sale fetched is the seller's, gain or loss: a loss one
   account realised against the maker is IMD another account took out, so it is not a claim on the seed or on other
   accounts' refunds. `claim` returns 0 for an account with nothing to claim.
 - **Spread bound (ConditionalsV2).** No trade, sells included, may leave an outcome more than 20 b below the top

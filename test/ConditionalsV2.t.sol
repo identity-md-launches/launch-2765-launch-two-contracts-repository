@@ -859,4 +859,93 @@ contract ConditionalsV2Test is Fixture {
         intake.setPrice(10 ether);
         assertEq(c.requestResolution(id), 2);
     }
+
+    /// @dev int256(shares) wrapped above type(int256).max into a tiny sale credited as ~2**256 shares (review e665f90a).
+    function test_review_buyAboveInt256MaxReverts() public {
+        uint256 id = _create();
+        uint256[2] memory huge = [type(uint256).max - 1e15 + 1, uint256(type(int256).max) + 1];
+        for (uint256 j; j < 2; ++j) {
+            for (uint8 i; i < 4; ++i) {
+                vm.prank(alice);
+                vm.expectRevert(ConditionalsV2.TradeTooLarge.selector);
+                c.buy(id, i, huge[j], type(uint256).max);
+            }
+        }
+        assertEq(c.sharesOf(id, alice)[0], 0);
+        _invariantsHold(id);
+    }
+
+    /// @dev Review bf61cff9: a pair pumps two outcomes so that the holder keeps ~1 IMD a share of cost on each while
+    ///      only one can pay. A short void lays the shortfall on cost that the position's final value does not back,
+    ///      so the honest staker, whose position is worth its cost, is refunded in full.
+    function test_review_voidShortfallFallsOnUnbackedCost() public {
+        uint256 id = _create();
+        _stake(carol, id, 1, 0, 100 ether);
+        uint256 honestNet = uint256(c.netIn(id, carol));
+        uint256 pairStart = imd.balanceOf(alice) + imd.balanceOf(bob);
+
+        vm.prank(alice);
+        c.buy(id, 0, 100 ether, type(uint256).max);
+        vm.prank(bob);
+        c.buy(id, 0, 100 ether, type(uint256).max);
+        vm.prank(alice);
+        c.sell(id, 0, 100 ether, 0);
+        vm.prank(alice);
+        c.buy(id, 1, 180 ether, type(uint256).max);
+        vm.prank(bob);
+        c.buy(id, 1, 100 ether, type(uint256).max);
+        vm.prank(alice);
+        c.sell(id, 1, 180 ether, 0);
+        uint256 holderNet = uint256(c.netIn(id, bob));
+
+        vm.warp(resolveTime + 30 days + 1);
+        c.voidMarket(id);
+        ConditionalsV2.Market memory m = c.getMarket(id);
+        assertLt(m.refundPool, m.refundBase, "the void is short");
+        assertEq(m.refundPool, m.makerBalance + m.sets);
+
+        uint256 paid = _claim(carol, id);
+        assertGe(paid, honestNet, "the honest staker is refunded its cost");
+        uint256 holderPaid = _claim(bob, id);
+        assertLt(holderPaid, holderNet, "the unbacked cost takes the shortfall");
+        assertEq(_claim(alice, id), 0);
+        assertLe(paid + holderPaid, m.refundPool, "the payouts fit in the pool");
+        assertLe(imd.balanceOf(alice) + imd.balanceOf(bob), pairStart + m.subsidy, "the pair takes at most the seed");
+    }
+
+    /// @dev Whatever the trades, a void pays every claim, in total at most the pool, and exactly the cost when it
+    ///      is not short.
+    function testFuzz_review_voidPaysEveryClaimWithinThePool(uint96[6] memory sizes, uint8[6] memory outcomes) public {
+        uint256 id = _create();
+        _stake(dave, id, 0, 1, 50 ether);
+        address[3] memory traders = [alice, bob, carol];
+        for (uint256 i; i < 6; ++i) {
+            address who = traders[i % 3];
+            uint8 o = outcomes[i] % 4;
+            uint256 amount = bound(sizes[i], 1e15, 150 ether);
+            vm.prank(who);
+            try c.buy(id, o, amount, type(uint256).max) {} catch {}
+            if (i % 2 == 1) {
+                address seller = traders[(i + 2) % 3];
+                uint256 held = c.sharesOf(id, seller)[o];
+                if (held >= 1e15) {
+                    vm.prank(seller);
+                    try c.sell(id, o, held, 0) {} catch {}
+                }
+            }
+        }
+        vm.warp(resolveTime + 30 days + 1);
+        c.voidMarket(id);
+        ConditionalsV2.Market memory m = c.getMarket(id);
+        address[4] memory all = [alice, bob, carol, dave];
+        uint256 total;
+        for (uint256 i; i < 4; ++i) {
+            uint256 net = uint256(c.netIn(id, all[i]));
+            uint256 paid = _claim(all[i], id);
+            if (m.refundPool == m.refundBase) assertEq(paid, net);
+            total += paid;
+        }
+        assertLe(total, m.refundPool);
+        assertGe(imd.balanceOf(address(c)), c.owed(creator) + c.owed(builder));
+    }
 }

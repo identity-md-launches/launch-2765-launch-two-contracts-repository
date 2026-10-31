@@ -190,17 +190,70 @@ sells; `_range` shared by `_normalised`, `_absorb` and `_checkSpread`; `_takeAsk
 attestation struct is hashed with one `abi.encode`; the question's `chainId` is the literal `1` (the hash vectors,
 including the live-API one, are unchanged); `_ask` reads the configuration from storage. Runtime: 24,490 bytes.
 
+## Review findings (second revision)
+
+A second independent review reopened the work with two findings, both reproduced with the reviewer's proofs on the
+accepted tree and fixed. Answers are in `.imd-responses.json`.
+
+### e665f90a (critical): `buy` wrapped shares above `type(int256).max`. Reproduced and fixed
+
+`Proof_e665f90a9e1f` failed on the accepted tree: `buy(id, i, 2**256 - 1e15, max)` was priced as a sale of 0.001
+shares and credited ~1.16e77 shares, and the thief left with 1,190.6 IMD of honest stakes. `buy` now reverts
+`TradeTooLarge` when `shares > uint256(type(int256).max)`, before the cast. The other casts are not exposed: `sell`
+and `exit` release the shares from the account first (an underflow for anyone holding fewer), and a stake's
+`amount` must be transferred in. The proof passes.
+
+- `src/ConditionalsV2.sol`: `buy`.
+- `test/ConditionalsV2.t.sol`: `test_review_buyAboveInt256MaxReverts` (both the proof's value and
+  `type(int256).max + 1`, on every outcome).
+
+### bf61cff9 (high): a short void diluted fully backed refunds. Reproduced and fixed
+
+`Proof_bf61cff9dc2b` failed on the accepted tree: refundBase 299.02 IMD against a pool of 213.99, the honest staker
+paid 71.405 of 99.776 IMD. Cost basis on several outcomes can exceed what the market holds, since only one outcome
+pays. The brief's rule is kept where the market can pay: a void that is not short refunds every account's cost
+(`netIn`) exactly as before. Only the short case changed: "pro rata if short" is now pro rata over the cost that
+the position's value at the final prices does not back, instead of over all cost.
+
+With V the value of every position at the final prices (`sum p_i (q_i + sets)`, rounded up), v an account's
+value (rounded down), c its cost, pool the market's balance and S = refundBase - pool, an account is paid
+`(v * S + c * (pool - V)) / (refundBase - V)`. That is between v and c, the payouts sum to at most the pool, and
+the pool always covers V because `makerBalance >= C(q) >= sum p_i q_i`. A stake's complete sets are worth their
+cost at any prices, so the honest staker is refunded in full. The holder whose cost was pumped on two outcomes takes
+the shortfall. If rounding ever made V reach the pool, each account is paid `v * pool / V`. The creator is still
+paid last (`balance - pool`, which is zero when short), and `refundPool`, `refundBase`, `netIn` and the `Voided`
+event are unchanged. The proof passes: the honest staker is paid 100.04 IMD and the pair ends +15.1 IMD, below the
+27.7 IMD seed.
+
+The reviewer offered refunding maker positions at final prices as one option. That would also change a void that
+is not short, where the brief says accounts get their net IMD back. This rule changes only the short case.
+
+- `src/ConditionalsV2.sol`: `_payout`.
+- `test/ConditionalsV2.t.sol`: `test_review_voidShortfallFallsOnUnbackedCost` (the proof's scenario: the honest
+  staker gets at least its cost, the holder less than its cost, the payouts fit in the pool, the pair takes at most
+  the seed), and `testFuzz_review_voidPaysEveryClaimWithinThePool` (random buys and sells by three accounts beside a
+  stake: every claim succeeds, they total at most the pool, and each is exactly `netIn` when not short).
+  `test_void_paysTheCreatorLastAndProRataWhenShort` passes unchanged: with one holder the rule pays the whole pool.
+- `README.md`: "Void refunds".
+
+### Size savings, behaviour unchanged
+
+The two fixes added about 360 bytes. To make room, the question document and the request body are now built in one
+`_documents` from shared parts (the same JSON strings, so the hash vectors, including the live-API one, are
+unchanged), and `_ask` builds them once instead of twice. Runtime: 24,541 bytes.
+
 ## Size
 
-ConditionalsV2's runtime is 24,490 bytes (limit 24,576), with `optimizer_runs = 1` as configured. It was 24,148 as
-it arrived and 24,433 after the audit fixes.
+ConditionalsV2's runtime is 24,541 bytes (limit 24,576), with `optimizer_runs = 1` as configured. It was 24,148 as
+it arrived, 24,433 after the audit fixes and 24,490 after the first revision.
 
 ## Checks run
 
-- `FOUNDRY_FUZZ_SEED=0x5d83227fee2096f4e9e1dfcdf39851d7320e2b9f2ba8471b17718ec60e88cbc5 forge test`: 70 tests pass.
-  That is 51 unit and fuzz tests, 1 invariant suite, 6 question and live-API hash vector tests, 4 oracle
+- `FOUNDRY_FUZZ_SEED=0x5d83227fee2096f4e9e1dfcdf39851d7320e2b9f2ba8471b17718ec60e88cbc5 forge test`: 73 tests pass.
+  That is 54 unit and fuzz tests, 1 invariant suite, 6 question and live-API hash vector tests, 4 oracle
   conformance tests, and the launch rehearsal. The 5 fork tests return without an RPC.
-- The review's proof `Proof_d1218754d210.t.sol` passes on this tree, as do `Proof_7011982acbf0` and
+- The second review's proofs `Proof_e665f90a9e1f.t.sol` and `Proof_bf61cff9dc2b.t.sol` pass on this tree.
+- The first review's proof `Proof_d1218754d210.t.sol` passes on this tree, as do `Proof_7011982acbf0` and
   `Proof_b37b3ab115a8`. `Proof_913c99ee0269` still stops at `PriceLimit`, which is the fix working (see above).
 - `FORK_ROBINHOOD=1 forge test --mc Fork`: all 5 fork tests pass against Robinhood Chain (the real Intake takes
   the asks, and the zap stakes with ETH and USDG and honours `minImd`).
