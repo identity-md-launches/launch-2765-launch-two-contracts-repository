@@ -672,6 +672,74 @@ contract ConditionalsV2FailurePathsTest is Fixture {
         new ConditionalsV2(address(0), imd_(address(imd)), IIntake(address(intake)), signer, builder);
     }
 
+    // ---- a short void ----------------------------------------------------------------------------------------------
+
+    /// @dev Builds the short void of .imd-findings.json: the maker ends below the accounts' cost bases.
+    function _shortVoid() internal returns (uint256 id) {
+        id = _create();
+        _stake(dave, id, 1, 0, 100 ether);
+        vm.prank(alice);
+        c.buy(id, 3, 199.999 ether, type(uint256).max);
+        vm.startPrank(carol);
+        c.buy(id, 0, 199.999 ether, type(uint256).max);
+        c.buy(id, 2, 199.999 ether, type(uint256).max);
+        c.buy(id, 0, 199.999 ether, type(uint256).max);
+        c.sell(id, 0, 192.5 ether, 0);
+        vm.stopPrank();
+        vm.warp(resolveTime + 30 days + 1);
+        c.voidMarket(id);
+    }
+
+    /// @dev What holds in a short void whatever the split: the pool is what the maker kept, `claimable` is what
+    ///      `claim` pays, nobody claims twice, a non-trader gets nothing, and the payouts fit in the pool. Whether an
+    ///      account can be refunded more than its cost is not asserted here: it can, which is reported in
+    ///      .imd-findings.json rather than blessed.
+    function test_void_shortPoolIsSharedWithinItself() public {
+        uint256 id = _shortVoid();
+        ConditionalsV2.Market memory m = c.getMarket(id);
+        assertLt(m.refundPool, m.refundBase, "the void is short");
+        assertEq(m.refundPool, m.makerBalance + m.sets, "the whole maker balance is the pool");
+        assertEq(m.budget, 0, "the unspent budget went back");
+
+        address[4] memory all = [alice, bob, carol, dave];
+        uint256 total;
+        for (uint256 i; i < 4; ++i) {
+            uint256 expected = c.claimable(id, all[i]);
+            uint256 before = imd.balanceOf(all[i]);
+            uint256 paid = _claim(all[i], id);
+            assertEq(paid, expected, "claimable is what claim pays");
+            assertEq(imd.balanceOf(all[i]) - before, paid);
+            if (paid != 0) {
+                vm.prank(all[i]);
+                vm.expectRevert(ConditionalsV2.AlreadyClaimed.selector);
+                c.claim(id);
+            }
+            total += paid;
+        }
+        assertEq(c.claimable(id, bob), 0, "bob never traded");
+        assertEq(c.claimable(id, carol), 0, "a claimed account has nothing left");
+        assertLe(total, m.refundPool, "the payouts fit in the pool");
+        assertGe(imd.balanceOf(address(c)), c.owed(creator) + c.owed(builder), "fees stay payable");
+        assertGt(total + 1e6, m.refundPool, "the pool is paid out, not stranded");
+    }
+
+    /// @dev A voided market refuses every trade, a second void and a settlement.
+    function test_void_isFinal() public {
+        uint256 id = _shortVoid();
+        vm.expectRevert(ConditionalsV2.NotVoidable.selector);
+        c.voidMarket(id);
+        vm.expectRevert(ConditionalsV2.NotSettleable.selector);
+        c.settle(id);
+        vm.expectRevert(ConditionalsV2.MarketNotOpen.selector);
+        c.requestResolution(id);
+        vm.prank(alice);
+        vm.expectRevert();
+        c.buy(id, 0, 1 ether, type(uint256).max);
+        vm.prank(alice);
+        vm.expectRevert();
+        c.exit(id, 0);
+    }
+
     function imd_(address a) internal pure returns (IERC20Like) {
         return IERC20Like(a);
     }
