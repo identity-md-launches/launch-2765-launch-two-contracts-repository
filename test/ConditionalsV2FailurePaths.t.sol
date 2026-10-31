@@ -291,25 +291,70 @@ contract ConditionalsV2FailurePathsTest is Fixture {
         c.voidMarket(id);
         assertEq(imd.balanceOf(creator), before, "seed and budget back");
         assertEq(imd.balanceOf(address(c)), 0);
-        vm.prank(creator);
-        vm.expectRevert(ConditionalsV2.NothingToClaim.selector);
-        c.claim(id);
+        assertEq(_claim(creator, id), 0, "the creator is paid by the void, not by a claim");
+        assertFalse(c.claimed(id, creator));
     }
 
     function test_claim_loserGetsNothingAndWinnerOnce() public {
         uint256 id = _create();
         _stake(alice, id, 0, 0, 2 ether);
         _stake(bob, id, 0, 1, 2 ether);
+        assertEq(c.claimable(id, alice), 0, "nothing claimable before the answers");
         _resolve(id, true, true);
-        assertEq(c.claimable(id, alice), 0, "nothing claimable before settlement");
+        assertEq(c.claimable(id, alice), c.sharesOf(id, alice)[0], "a claim would settle");
+        assertEq(c.claimable(id, bob), 0);
         assertEq(_claim(alice, id), c.sharesOf(id, alice)[0]);
         assertEq(c.claimable(id, alice), 0);
         vm.prank(alice);
         vm.expectRevert(ConditionalsV2.AlreadyClaimed.selector);
         c.claim(id);
-        vm.prank(bob);
-        vm.expectRevert(ConditionalsV2.NothingToClaim.selector);
+        uint256 held = imd.balanceOf(bob);
+        assertEq(_claim(bob, id), 0, "the loser is paid nothing");
+        assertEq(imd.balanceOf(bob), held);
+        assertFalse(c.claimed(id, bob), "an empty claim marks nothing");
+    }
+
+    function test_claim_openMarketAndUnknownMarketAreRefused() public {
+        uint256 id = _create();
+        _stake(alice, id, 0, 0, 2 ether);
+        vm.prank(alice);
+        vm.expectRevert(ConditionalsV2.NotSettleable.selector);
         c.claim(id);
+        vm.prank(alice);
+        vm.expectRevert(ConditionalsV2.UnknownMarket.selector);
+        c.claim(id + 1);
+        assertEq(c.claimable(id + 1, alice), 0);
+    }
+
+    function test_claim_voidRefundIsPaidOnce() public {
+        uint256 id = _create();
+        _stake(alice, id, 0, 0, 5 ether);
+        vm.warp(resolveTime + 30 days + 1);
+        c.voidMarket(id);
+        uint256 refund = uint256(c.netIn(id, alice));
+        assertEq(c.claimable(id, alice), refund);
+        assertEq(_claim(alice, id), refund);
+        assertEq(c.claimable(id, alice), 0);
+        vm.prank(alice);
+        vm.expectRevert(ConditionalsV2.AlreadyClaimed.selector);
+        c.claim(id);
+        assertEq(uint8(c.getMarket(id).status), uint8(ConditionalsV2.Status.Voided));
+    }
+
+    /// @dev A failed payment to a blocked claimant leaves the claim standing: nothing is marked or lost.
+    function test_claim_blockedAccountRevertsAndKeepsItsClaim() public {
+        uint256 id = _create();
+        _stake(alice, id, 0, 0, 5 ether);
+        _resolve(id, true, true);
+        c.settle(id);
+        uint256 due = c.claimable(id, alice);
+        imd.setBlocked(alice, true);
+        vm.prank(alice);
+        vm.expectRevert(bytes("blocked"));
+        c.claim(id);
+        assertFalse(c.claimed(id, alice));
+        imd.setBlocked(alice, false);
+        assertEq(_claim(alice, id), due);
     }
 
     function test_withdrawOwed_paysOnceAndRefusesNothing() public {
@@ -369,6 +414,39 @@ contract ConditionalsV2FailurePathsTest is Fixture {
         vm.stopPrank();
         vm.expectRevert(ConditionalsV2.ZeroAddress.selector);
         c.stakeFor(address(0), id, 0, 0, 1 ether, 0);
+    }
+
+    /// @dev The largest size `buy` can price as a buy. Sizes above type(int256).max are reported in .imd-findings.json.
+    function test_buy_hugeSizesInsideInt256AreRefused() public {
+        uint256 id = _create();
+        uint256 held = imd.balanceOf(alice);
+        vm.startPrank(alice);
+        vm.expectRevert();
+        c.buy(id, 0, uint256(type(int256).max), type(uint256).max);
+        vm.expectRevert(ConditionalsV2.PriceLimit.selector);
+        c.buy(id, 0, 20 * B + 1, type(uint256).max);
+        vm.stopPrank();
+        assertEq(imd.balanceOf(alice), held);
+        assertEq(c.sharesOf(id, alice)[0], 0);
+    }
+
+    /// forge-config: default.fuzz.runs = 1000
+    function testFuzz_buy_neverCreditsMoreThanItChargesFor(uint256 shares, uint8 outcome) public {
+        shares = bound(shares, 1e15, uint256(type(int256).max));
+        uint256 id = _create();
+        uint256 held = imd.balanceOf(alice);
+        vm.prank(alice);
+        try c.buy(id, outcome % 4, shares, type(uint256).max) returns (uint256 cost, uint256 fee) {
+            assertLe(shares, 20 * B, "the spread bound caps a buy");
+            assertEq(c.sharesOf(id, alice)[outcome % 4], shares);
+            assertEq(c.netIn(id, alice), int256(cost));
+            assertEq(held - imd.balanceOf(alice), cost + fee);
+            // A share is worth at most 1 IMD, and C(q) grows slower than q.
+            assertLe(cost, shares);
+        } catch {
+            assertEq(c.sharesOf(id, alice)[outcome % 4], 0);
+            assertEq(imd.balanceOf(alice), held);
+        }
     }
 
     function test_sell_moreThanHeldReverts() public {
@@ -564,7 +642,9 @@ contract ConditionalsV2FailurePathsTest is Fixture {
         // A creator's maxBudget protects against the new price.
         vm.prank(creator);
         vm.expectRevert(abi.encodeWithSelector(ConditionalsV2.BudgetTooHigh.selector, 4 ether, 1 ether));
-        c.createMarket(CONDITION, OUTCOME, RULES, uint64(block.timestamp + 1 days), uint64(block.timestamp + 2 days), 1 ether, B);
+        c.createMarket(
+            CONDITION, OUTCOME, RULES, uint64(block.timestamp + 1 days), uint64(block.timestamp + 2 days), 1 ether, B
+        );
     }
 
     function test_owner_twoStepTransfer() public {

@@ -25,6 +25,7 @@ contract LifecycleHandler is Test {
     /// @dev Ghosts.
     mapping(uint256 => uint8) public seenStatus;
     mapping(uint256 => mapping(address => uint256)) public paid;
+    mapping(uint256 => uint256) public voidPaid;
     bool public overpaid;
     bool public reopened;
     bool public settleClaimWrong;
@@ -198,12 +199,14 @@ contract LifecycleHandler is Test {
         int256 net = c.netIn(id, a);
         vm.prank(a);
         try c.claim(id) returns (uint256 amount) {
-            ++claims;
+            // An account with nothing to claim is told so with a zero and is not marked.
+            if (amount != 0) ++claims;
             paid[id][a] += amount;
             ConditionalsV2.Market memory m = c.getMarket(id);
             if (m.status == ConditionalsV2.Status.Voided) {
-                // A void refunds at most what the account put in, net of what it took out, fees excluded.
-                if (net <= 0 || amount > uint256(net)) overpaid = true;
+                // A void refunds at most what the shares the account still holds cost it, fees excluded.
+                voidPaid[id] += amount;
+                if (net < 0 || amount > uint256(net)) overpaid = true;
             } else if (amount != c.sharesOf(id, a)[m.winner]) {
                 settleClaimWrong = true;
             }
@@ -298,7 +301,8 @@ contract ConditionalsV2LifecycleInvariantTest is Test {
         assertFalse(h.reopened());
     }
 
-    /// @dev A void never refunds an account more than its net IMD in; a settlement pays exactly the winning shares.
+    /// @dev A void never refunds an account more than the cost of what it holds; a settlement pays exactly the winning
+    ///      shares.
     function invariant_claimsAreExact() public view {
         assertFalse(h.overpaid());
         assertFalse(h.settleClaimWrong());
@@ -326,6 +330,22 @@ contract ConditionalsV2LifecycleInvariantTest is Test {
                 assertLe(m.refundPool, m.refundBase);
                 assertEq(m.budget, 0);
             }
+        }
+    }
+
+    /// @dev `refundBase` is the sum of the accounts' cost bases at every step, and what a void has paid out stays inside
+    ///      the pool it set aside.
+    function invariant_refundBooksAgree() public view {
+        for (uint256 k; k < 2; ++k) {
+            ConditionalsV2.Market memory m = c.getMarket(ids[k]);
+            uint256 total;
+            for (uint256 i; i < h.actorCount(); ++i) {
+                int256 net = c.netIn(ids[k], h.actors(i));
+                assertGe(net, 0);
+                total += uint256(net);
+            }
+            assertEq(total, m.refundBase);
+            assertLe(h.voidPaid(ids[k]), m.refundPool);
         }
     }
 
