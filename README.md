@@ -39,7 +39,10 @@ to the outcome: "if the Clarity Act passes, ETH above $5k is 62%; if it doesn't,
    - The burn, the fee and the creator's unspent budget are pushed in the same transaction. If IMD refuses one of
      those transfers (its owner can block an address), the amount is credited to `owed` and that party collects it
      with `withdrawOwed()`; the stakers' settlement, void and claims go through regardless.
-6. **Void.** With no usable answer 30 days after `resolveTime`, anyone can call `voidMarket`: every stake is refunded.
+6. **Void.** With no usable answer 30 days after `resolveTime`, anyone can call `voidMarket`: every position is
+   refunded at what it cost. In ConditionalsV2 each account gets back what it paid, fees excluded, for the shares it
+   still holds (`netIn`), pro rata if the market is short, and the creator is paid last. Gains and losses already
+   realised by selling or redeeming shares are not refunded (see "Void refunds" below).
    A void waits while an unanswered question has an ask less than a day old still live, so an answer on its way
    cannot be voided away; `voidable(marketId)` says whether it would succeed now.
 
@@ -66,8 +69,15 @@ to the outcome: "if the Clarity Act passes, ETH above $5k is 62%; if it doesn't,
   questions; such a market ends in a void.
 - **Price changes.** An ask reads the Intake's live price (`priceOf`) and pays it, up to `MAX_PRICE` (10 IMD), so a
   price cut is not overpaid from the creator's budget. In ConditionalsV2 a price rise no longer strands a market: the
-  budget pays while it lasts and the caller of `requestResolution` pays the rest, as for a retry. A live price of
-  zero, above 10 IMD, or unreadable falls back to the market's snapshot price.
+  budget is drawn down to zero and the caller of `requestResolution` pays only the shortfall. A retry is paid the
+  same way, from the budget while it lasts. A live price of zero, above 10 IMD, or unreadable falls back to the
+  market's snapshot price.
+- **Void refunds (ConditionalsV2).** The contract keeps, per account and outcome, what the shares still held cost: a
+  buy adds its cost, a stake adds its collateral spread over the three outcomes it keeps by their prices, and a sell
+  or an exit releases the sold shares' share of it. A void refunds that sum (`netIn`), pro rata if the market cannot
+  cover it, and the creator takes what is left. What a sale fetched is the seller's, gain or loss: a loss one
+  account realised against the maker is IMD another account took out, so it is not a claim on the seed or on other
+  accounts' refunds. `claim` returns 0 for an account with nothing to claim.
 - **Spread bound (ConditionalsV2).** No trade, sells included, may leave an outcome more than 20 b below the top
   outcome, so every outcome keeps a price. `exit` sells only what fits; any shares it cannot sell stay with the
   account (each is priced under about 2e-9 IMD) and a later `exit` or `sell` can sell them once the market moves.

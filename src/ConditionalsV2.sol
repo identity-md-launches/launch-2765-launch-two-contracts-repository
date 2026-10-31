@@ -34,7 +34,9 @@ import {IOracleAttestation} from "./interfaces/IOracleAttestation.sol";
 ///
 /// Settlement needs both answers. Each share of the outcome that happened claims 1 IMD, and what is left in the maker
 /// goes to the creator. A market with no usable answer by `voidAfter` (resolveTime + 30 days) can be voided by anyone:
-/// each account with money in gets it back at cost, excluding fees and pro rata if short, and the creator is paid last.
+/// each account gets back what it paid for the shares it still holds, excluding fees and pro rata if short, and the
+/// creator is paid last. Gains and losses already realised against the maker are not refunded: a loss one account
+/// realised is IMD another account took out, so refunding it would come out of the seed and the other refunds.
 /// A void waits while an ask younger than RETRY_DELAY is still live, so an answer on its way cannot be voided away.
 ///
 /// The owner can only rotate the oracle configuration for future markets (behind a 3 day delay) and change the fee
@@ -92,8 +94,8 @@ contract ConditionalsV2 is Ownable2Step, ReentrancyGuard, EIP712, IOracleAttesta
     uint16 internal constant MAX_PANEL_SIZE = 100;
     uint256 internal constant MAX_PRICE = 10 ether;
 
-    /// @notice The chain the oracle question's window is pinned to. On Robinhood Chain `block.number` is the
-    ///         Ethereum mainnet block number, so the window is an Ethereum block.
+    /// @notice The chain the oracle question's window is pinned to, written as a literal in `_document`. On Robinhood
+    ///         Chain `block.number` is the Ethereum mainnet block number, so the window is an Ethereum block.
     uint256 internal constant QUESTION_CHAIN_ID = 1;
     /// @notice How far behind `block.number` the question's block is: the oracle needs at least 5 blocks of depth.
     uint256 public constant WINDOW_DEPTH = 10;
@@ -167,7 +169,7 @@ contract ConditionalsV2 is Ownable2Step, ReentrancyGuard, EIP712, IOracleAttesta
         /// @dev Complete sets outstanding, each backed by 1 IMD held outside the maker. Total shares of outcome i are
         ///      q[i] + sets.
         uint256 sets;
-        /// @dev Sum of the positive entries of `netIn`: what a void has to refund.
+        /// @dev Sum of every account's `netIn` (the cost of the shares it holds): what a void has to refund.
         uint256 refundBase;
         /// @dev Set on void: how much of `refundBase` the market can pay.
         uint256 refundPool;
@@ -203,8 +205,10 @@ contract ConditionalsV2 is Ownable2Step, ReentrancyGuard, EIP712, IOracleAttesta
 
     /// @notice Internal, non-transferable shares: shares[marketId][account][outcome].
     mapping(uint256 => mapping(address => uint256[4])) internal _shares;
-    /// @notice IMD an account has put into a market net of what it took out, fees excluded. A void refunds it.
-    mapping(uint256 => mapping(address => int256)) public netIn;
+    /// @notice What each account paid for the shares it holds, per outcome, fees excluded: _basis[marketId][account]
+    ///         [outcome]. A buy adds its cost, a stake adds its collateral split over the outcomes it keeps by their
+    ///         prices, and a sell or an exit releases the sold shares' share of it. A void refunds the sum (`netIn`).
+    mapping(uint256 => mapping(address => uint256[4])) internal _basis;
     mapping(uint256 => mapping(address => bool)) public claimed;
 
     /// @notice Asks this contract sent, keyed by keccak256(intake, intake requestId).
@@ -356,10 +360,9 @@ contract ConditionalsV2 is Ownable2Step, ReentrancyGuard, EIP712, IOracleAttesta
     ) external nonReentrant returns (uint256 marketId) {
         _validateText(condition, MAX_CONDITION_LENGTH);
         _validateText(outcome, MAX_OUTCOME_LENGTH);
-        _validateText(rules, MAX_RULES_LENGTH);
         // The oracle lowercases a definition that is exactly an address or a 32-byte hex string before hashing it.
         // Such a value has no space, so requiring one keeps the hash this contract computes equal to the oracle's.
-        if (!_hasSpace(rules)) revert InvalidText();
+        if (!_validateText(rules, MAX_RULES_LENGTH)) revert InvalidText();
         if (closeTime <= block.timestamp || resolveTime < closeTime || resolveTime > block.timestamp + MAX_HORIZON) {
             revert InvalidTimes();
         }
@@ -424,7 +427,7 @@ contract ConditionalsV2 is Ownable2Step, ReentrancyGuard, EIP712, IOracleAttesta
         if (outcome > 3) revert InvalidChoice();
         if (shares < MIN_TRADE) revert TradeTooSmall();
 
-        (int256[4] memory q, uint256 c) = _quoteBuy(m.q, m.b, outcome, shares);
+        (int256[4] memory q, uint256 c) = _quote(m.q, m.b, outcome, int256(shares));
         _checkSpread(q, m.b);
         cost = c;
         fee = _fee(cost);
@@ -433,7 +436,8 @@ contract ConditionalsV2 is Ownable2Step, ReentrancyGuard, EIP712, IOracleAttesta
         m.q = q;
         m.makerBalance += cost;
         _shares[marketId][msg.sender][outcome] += shares;
-        _addNet(marketId, m, msg.sender, int256(cost));
+        _basis[marketId][msg.sender][outcome] += cost;
+        m.refundBase += cost;
 
         imd.safeTransferFrom(msg.sender, address(this), cost + fee);
         _chargeFee(m, fee);
@@ -470,15 +474,14 @@ contract ConditionalsV2 is Ownable2Step, ReentrancyGuard, EIP712, IOracleAttesta
         if (sets_ != 0) {
             // Sets bought from the maker one outcome at a time are not in `sets`: the maker redeems those, which moves
             // every q down by the same amount and C(q) with it, so prices do not change and makerBalance >= C(q).
-            uint256 minted = sets_ < m.sets ? sets_ : m.sets;
+            uint256 minted = FPM.min(sets_, m.sets);
             uint256 fromMaker = sets_ - minted;
             for (uint256 i; i < 4; ++i) {
-                held[i] -= sets_;
+                _release(marketId, m, msg.sender, i, sets_);
                 m.q[i] -= int256(fromMaker);
             }
             m.sets -= minted;
             m.makerBalance -= fromMaker;
-            _addNet(marketId, m, msg.sender, -int256(sets_));
             proceeds = sets_;
         }
         uint256 fee;
@@ -503,8 +506,9 @@ contract ConditionalsV2 is Ownable2Step, ReentrancyGuard, EIP712, IOracleAttesta
     // ---------------------------------------------------------------------------------------------------------------
 
     /// @notice Asks the oracle every question the market still needs. Anyone can call it from resolveTime.
-    ///         The first ask of each question is paid from the market's budget; a retry, allowed RETRY_DELAY after
-    ///         the last ask of that question if it has not been answered, is paid by the caller.
+    ///         Each ask is paid from the market's budget while it lasts, then by the caller: the budget is drawn down
+    ///         to zero and the caller pays only the shortfall. A retry is allowed RETRY_DELAY after the last ask of a
+    ///         question that has not been answered, or at once after the Intake reported a failure.
     /// @return asked How many questions were asked.
     function requestResolution(uint256 marketId) external nonReentrant returns (uint256 asked) {
         Market storage m = _market(marketId);
@@ -523,47 +527,47 @@ contract ConditionalsV2 is Ownable2Step, ReentrancyGuard, EIP712, IOracleAttesta
 
     /// @notice The Intake's callback with a signed oracle answer. Selector 0x510379c7.
     function onOracleResult(bytes32 requestId, Attestation calldata a, bytes calldata signature) external {
-        bytes32 key = _askKey(msg.sender, requestId);
-        Ask memory ask = asks[key];
-        if (!ask.live) revert UnknownAsk();
-        Market storage m = _markets[ask.marketId];
+        (uint256 marketId, uint8 question, bytes32 questionHash) = _takeAsk(requestId);
+        Market storage m = _markets[marketId];
 
-        delete asks[key];
-        --m.openAsks[ask.question];
-
-        if (m.status != Status.Open || m.answers[ask.question] != UNANSWERED) {
-            emit AnswerIgnored(ask.marketId, ask.question, requestId);
+        if (m.status != Status.Open || m.answers[question] != UNANSWERED) {
+            emit AnswerIgnored(marketId, question, requestId);
             return;
         }
 
-        OracleConfig memory config = m.oracle;
         if (
-            a.questionHash != ask.questionHash || a.answerType != 0 || a.answer.length != 32
-                || a.panelSize < config.panelSize || a.quorum < config.quorum || a.agreed < a.quorum
+            a.questionHash != questionHash || a.answerType != 0 || a.answer.length != 32
+                || a.panelSize < m.oracle.panelSize || a.quorum < m.oracle.quorum || a.agreed < a.quorum
                 || a.agreed > a.panelSize || block.timestamp > a.expiresAt
                 || a.issuedAt > block.timestamp + ISSUED_AT_TOLERANCE
         ) revert BadAttestation();
 
-        if (!SignatureChecker.isValidSignatureNow(config.signer, attestationDigest(a), signature)) {
+        if (!SignatureChecker.isValidSignatureNow(m.oracle.signer, attestationDigest(a), signature)) {
             revert BadAttestation();
         }
 
         uint256 value = abi.decode(a.answer, (uint256));
         if (value > 1) revert BadAttestation();
 
-        m.answers[ask.question] = value == 1 ? ANSWER_TRUE : ANSWER_FALSE;
-        emit Answered(ask.marketId, ask.question, value == 1, a.requestId);
+        m.answers[question] = value == 1 ? ANSWER_TRUE : ANSWER_FALSE;
+        emit Answered(marketId, question, value == 1, a.requestId);
     }
 
     /// @notice The Intake's callback for a refusal (status 1) or no result (2). Selector 0x5a0df71e.
-    ///         Unsigned, so it only clears the ask: the question can be asked again at once, paid by the caller.
+    ///         Unsigned, so it only clears the ask: the question can be asked again at once.
     function onFailure(bytes32 requestId, uint8 status, bytes32 reason, uint16, uint16, bytes calldata) external {
+        (uint256 marketId, uint8 question,) = _takeAsk(requestId);
+        emit AskFailed(marketId, question, requestId, status, reason);
+    }
+
+    /// @dev Closes the live ask the caller (an intake) made for `requestId` and returns what it was for.
+    function _takeAsk(bytes32 requestId) internal returns (uint256 marketId, uint8 question, bytes32 questionHash) {
         bytes32 key = _askKey(msg.sender, requestId);
-        Ask memory ask = asks[key];
+        Ask storage ask = asks[key];
         if (!ask.live) revert UnknownAsk();
+        (marketId, question, questionHash) = (ask.marketId, ask.question, ask.questionHash);
         delete asks[key];
-        --_markets[ask.marketId].openAsks[ask.question];
-        emit AskFailed(ask.marketId, ask.question, requestId, status, reason);
+        --_markets[marketId].openAsks[question];
     }
 
     /// @notice Settles a market once the oracle has answered both questions.
@@ -580,7 +584,7 @@ contract ConditionalsV2 is Ownable2Step, ReentrancyGuard, EIP712, IOracleAttesta
         if (!_voidable(m)) revert NotVoidable();
         m.status = Status.Voided;
         uint256 balance = m.makerBalance + m.sets;
-        uint256 pool = balance < m.refundBase ? balance : m.refundBase;
+        uint256 pool = FPM.min(balance, m.refundBase);
         uint256 toCreator = balance - pool;
         m.refundPool = pool;
         emit Voided(marketId, pool, m.refundBase, toCreator);
@@ -589,6 +593,7 @@ contract ConditionalsV2 is Ownable2Step, ReentrancyGuard, EIP712, IOracleAttesta
     }
 
     /// @notice Pays the caller everything owed to them by a settled or voided market. Settles first if it can.
+    ///         Returns 0, and changes nothing, for an account that has nothing to claim.
     function claim(uint256 marketId) external nonReentrant returns (uint256 amount) {
         Market storage m = _market(marketId);
         if (m.status == Status.Open) {
@@ -597,7 +602,7 @@ contract ConditionalsV2 is Ownable2Step, ReentrancyGuard, EIP712, IOracleAttesta
         }
         if (claimed[marketId][msg.sender]) revert AlreadyClaimed();
         amount = _payout(marketId, m, msg.sender);
-        if (amount == 0) revert NothingToClaim();
+        if (amount == 0) return 0;
         claimed[marketId][msg.sender] = true;
         imd.safeTransfer(msg.sender, amount);
         emit Claimed(marketId, msg.sender, amount);
@@ -617,13 +622,19 @@ contract ConditionalsV2 is Ownable2Step, ReentrancyGuard, EIP712, IOracleAttesta
     // ---------------------------------------------------------------------------------------------------------------
 
     function getMarket(uint256 marketId) external view returns (Market memory) {
-        if (marketId == 0 || marketId > marketCount) revert UnknownMarket();
-        return _markets[marketId];
+        return _market(marketId);
     }
 
     /// @notice An account's shares per outcome.
     function sharesOf(uint256 marketId, address account) external view returns (uint256[4] memory) {
         return _shares[marketId][account];
+    }
+
+    /// @notice What an account paid, fees excluded, for the shares it still holds in a market: the cost of its
+    ///         position, which a void refunds (pro rata if short). Gains and losses realised by selling or redeeming
+    ///         shares are not in it.
+    function netIn(uint256 marketId, address account) external view returns (int256) {
+        return int256(_basisOf(marketId, account));
     }
 
     /// @notice The seed a market with liquidity parameter `b` needs: b ln 4, rounded up.
@@ -655,33 +666,35 @@ contract ConditionalsV2 is Ownable2Step, ReentrancyGuard, EIP712, IOracleAttesta
         Market storage m = _market(marketId);
         if (world > 1 || side > 1) revert InvalidChoice();
         if (amount < MIN_TRADE) revert TradeTooSmall();
-        (, shares,,, fee,) = _stakeMath(m.q, m.b, m.makerBalance, world, side, amount);
+        uint256 gross;
+        uint256 spend;
+        (, shares,, gross, spend,) = _stakeMath(m.q, m.b, m.makerBalance, world, side, amount);
+        fee = gross - spend;
     }
 
-    /// @notice What `trader` could claim now (zero before settlement or void, or after claiming).
+    /// @notice What `trader` could claim now, counting an open market `claim` would settle (zero after claiming).
     function claimable(uint256 marketId, address trader) external view returns (uint256) {
         Market storage m = _markets[marketId];
-        if (m.status == Status.Open || claimed[marketId][trader]) return 0;
+        if (claimed[marketId][trader]) return 0;
+        if (m.status == Status.Open) return _settleable(m) ? _shares[marketId][trader][_winner(m)] : 0;
         return _payout(marketId, m, trader);
     }
 
     /// @notice Whether `requestResolution` would ask `question` now.
     function askable(uint256 marketId, uint8 question) external view returns (bool) {
         Market storage m = _markets[marketId];
-        if (marketId == 0 || marketId > marketCount || question > 1) return false;
+        if (!_known(marketId) || question > 1) return false;
         if (m.status != Status.Open || block.timestamp < m.resolveTime || block.timestamp > m.voidAfter) return false;
         return _askable(m, question);
     }
 
     function settleable(uint256 marketId) external view returns (bool) {
-        if (marketId == 0 || marketId > marketCount) return false;
-        return _settleable(_markets[marketId]);
+        return _known(marketId) && _settleable(_markets[marketId]);
     }
 
     /// @notice Whether `voidMarket` would succeed now.
     function voidable(uint256 marketId) external view returns (bool) {
-        if (marketId == 0 || marketId > marketCount) return false;
-        return _voidable(_markets[marketId]);
+        return _known(marketId) && _voidable(_markets[marketId]);
     }
 
     /// @notice The EIP-712 digest this contract verifies an attestation's signature against.
@@ -704,8 +717,12 @@ contract ConditionalsV2 is Ownable2Step, ReentrancyGuard, EIP712, IOracleAttesta
     // Internals
     // ---------------------------------------------------------------------------------------------------------------
 
+    function _known(uint256 marketId) internal view returns (bool) {
+        return marketId != 0 && marketId <= marketCount;
+    }
+
     function _market(uint256 marketId) internal view returns (Market storage) {
-        if (marketId == 0 || marketId > marketCount) revert UnknownMarket();
+        if (!_known(marketId)) revert UnknownMarket();
         return _markets[marketId];
     }
 
@@ -732,10 +749,10 @@ contract ConditionalsV2 is Ownable2Step, ReentrancyGuard, EIP712, IOracleAttesta
     }
 
     /// @dev What an ask pays: the Intake's live price, up to MAX_PRICE (the Intake pulls exactly `amount`). A price
-    ///      above the snapshot is paid from the budget while it lasts and then by the caller, as a retry is, so a
-    ///      price rise does not leave the market able only to void (audit b37b3ab1). An Intake without `priceOf`,
-    ///      or with a live price of zero or above MAX_PRICE, is charged the snapshot.
-    function _askPrice(OracleConfig memory config) internal view returns (uint256 price) {
+    ///      above the snapshot is paid from the budget while it lasts and then by the caller, so a price rise does
+    ///      not leave the market able only to void (audit b37b3ab1). An Intake without `priceOf`, or with a live
+    ///      price of zero or above MAX_PRICE, is charged the snapshot.
+    function _askPrice(OracleConfig storage config) internal view returns (uint256 price) {
         price = config.price;
         try IIntakePrice(address(config.intake)).priceOf(config.action, address(imd)) returns (uint256 live) {
             if (live != 0 && live <= MAX_PRICE) price = live;
@@ -743,15 +760,14 @@ contract ConditionalsV2 is Ownable2Step, ReentrancyGuard, EIP712, IOracleAttesta
     }
 
     function _ask(uint256 marketId, Market storage m, uint8 q) internal {
-        OracleConfig memory config = m.oracle;
+        OracleConfig storage config = m.oracle;
         uint256 price = _askPrice(config);
         uint256 windowBlock = block.number - WINDOW_DEPTH;
 
-        if (m.budget >= price) {
-            m.budget -= price;
-        } else {
-            imd.safeTransferFrom(msg.sender, address(this), price);
-        }
+        // The budget pays while it lasts; the caller pays only the shortfall (review fc599613).
+        uint256 fromBudget = FPM.min(m.budget, price);
+        m.budget -= fromBudget;
+        if (price > fromBudget) imd.safeTransferFrom(msg.sender, address(this), price - fromBudget);
         totalOracleSpend += price;
 
         bytes32 questionHash = keccak256(bytes(_questionDocument(marketId, m, q, windowBlock)));
@@ -778,10 +794,13 @@ contract ConditionalsV2 is Ownable2Step, ReentrancyGuard, EIP712, IOracleAttesta
         emit ResolutionRequested(marketId, q, requestId, questionHash, windowBlock);
     }
 
+    /// @dev The outcome the stored answers select.
+    function _winner(Market storage m) internal view returns (uint8) {
+        return 2 * (m.answers[CONDITION] == ANSWER_TRUE ? 0 : 1) + (m.answers[OUTCOME] == ANSWER_TRUE ? 0 : 1);
+    }
+
     function _settle(uint256 marketId, Market storage m) internal {
-        uint8 w = m.answers[CONDITION] == ANSWER_TRUE ? 0 : 1;
-        uint8 s = m.answers[OUTCOME] == ANSWER_TRUE ? 0 : 1;
-        uint8 winner = 2 * w + s;
+        uint8 winner = _winner(m);
         m.status = Status.Settled;
         m.winner = winner;
 
@@ -807,17 +826,25 @@ contract ConditionalsV2 is Ownable2Step, ReentrancyGuard, EIP712, IOracleAttesta
     ///      credited to `owed` instead and the recipient collects it with `withdrawOwed`.
     function _push(address to, uint256 amount) internal {
         if (amount == 0) return;
-        (bool ok, bytes memory data) = address(imd).call(abi.encodeCall(IERC20.transfer, (to, amount)));
-        if (ok && (data.length == 0 ? address(imd).code.length > 0 : abi.decode(data, (bool)))) return;
+        try imd.transfer(to, amount) returns (bool ok) {
+            if (ok) return;
+        } catch {}
         owed[to] += amount;
         emit PaymentDeferred(to, amount);
     }
 
     function _payout(uint256 marketId, Market storage m, address account) internal view returns (uint256) {
         if (m.status == Status.Settled) return _shares[marketId][account][m.winner];
-        int256 net = netIn[marketId][account];
-        if (net <= 0 || m.refundBase == 0) return 0;
-        return FPM.fullMulDiv(uint256(net), m.refundPool, m.refundBase);
+        uint256 net = _basisOf(marketId, account);
+        if (net == 0) return 0;
+        return FPM.fullMulDiv(net, m.refundPool, m.refundBase);
+    }
+
+    function _basisOf(uint256 marketId, address account) internal view returns (uint256 total) {
+        uint256[4] storage basis = _basis[marketId][account];
+        for (uint256 i; i < 4; ++i) {
+            total += basis[i];
+        }
     }
 
     function _tradable(uint256 marketId) internal view returns (Market storage m) {
@@ -834,21 +861,37 @@ contract ConditionalsV2 is Ownable2Step, ReentrancyGuard, EIP712, IOracleAttesta
         if (world > 1 || side > 1) revert InvalidChoice();
         if (amount < MIN_TRADE) revert TradeTooSmall();
 
-        (int256[4] memory q, uint256 k, uint256 balance, uint256 collateral, uint256 fee, uint256 absorbed) =
+        (int256[4] memory q, uint256 k, uint256 balance, uint256 gross, uint256 spend, uint256 absorbed) =
             _stakeMath(m.q, m.b, m.makerBalance, world, side, amount);
         if (k < minShares) revert SlippageExceeded();
         shares = k;
+        uint256 fee = gross - spend;
 
         uint8 chosen = 2 * world + side;
+        uint8 other = 2 * (1 - world);
         uint256[4] storage held = _shares[marketId][account];
         // One complete set per IMD, less the opposite side sold to the maker, plus what the proceeds bought.
         held[chosen] += amount + k;
-        held[2 * (1 - world)] += amount;
-        held[2 * (1 - world) + 1] += amount;
+        held[other] += amount;
+        held[other + 1] += amount;
+        // The set cost `amount`: the opposite side's share of it is what it fetched, the three outcomes kept share the
+        // rest by their prices before the trade, and the chosen one also carries the proceeds spent on it.
+        {
+            uint256[4] memory p = _prices(m.q, m.b);
+            uint256[4] storage basis = _basis[marketId][account];
+            uint256 rest = amount - gross;
+            uint256 denominator = p[other] + p[other + 1] + p[chosen];
+            uint256 first = rest * p[other] / denominator;
+            uint256 second = rest * p[other + 1] / denominator;
+            basis[other] += first;
+            basis[other + 1] += second;
+            basis[chosen] += rest - first - second + spend;
+        }
+        uint256 collateral = amount - fee;
+        m.refundBase += collateral;
         m.q = q;
         m.makerBalance = balance;
         m.sets = m.sets + amount - absorbed;
-        _addNet(marketId, m, account, int256(collateral));
 
         imd.safeTransferFrom(msg.sender, address(this), amount);
         _chargeFee(m, fee);
@@ -856,32 +899,28 @@ contract ConditionalsV2 is Ownable2Step, ReentrancyGuard, EIP712, IOracleAttesta
         emit Traded(marketId, account, int256(collateral), fee);
     }
 
-    /// @dev The stake's arithmetic. `collateral` is what stays in the market: `amount` less the two fees.
+    /// @dev The stake's arithmetic: `gross` is what the opposite side fetched and `spend` what bought the extra
+    ///      shares. The two fees add up to `gross - spend`, so `amount - gross + spend` is the collateral that stays.
     function _stakeMath(int256[4] memory q0, uint256 b, uint256 balance0, uint8 world, uint8 side, uint256 amount)
         internal
         pure
-        returns (int256[4] memory q, uint256 k, uint256 balance, uint256 collateral, uint256 fee, uint256 absorbed)
+        returns (int256[4] memory q, uint256 k, uint256 balance, uint256 gross, uint256 spend, uint256 absorbed)
     {
         uint8 chosen = 2 * world + side;
         uint8 opposite = 2 * world + (1 - side);
 
-        uint256 gross;
-        (q, gross) = _quoteSell(q0, b, opposite, amount);
+        (q, gross) = _quote(q0, b, opposite, -int256(amount));
         absorbed = _absorb(q);
         if (gross > balance0 + absorbed) revert InsufficientMaker();
-        uint256 sellFee = _fee(gross);
-        uint256 spendable = gross - sellFee;
 
-        // spend + its fee = spendable, rounding the spend down.
-        uint256 spend = spendable * BPS / (BPS + FEE_BPS);
-        uint256 buyFee = spendable - spend;
+        // What is left after the sell fee buys shares plus their fee: spend + its fee = gross - sellFee, rounding the
+        // spend down.
+        spend = (gross - _fee(gross)) * BPS / (BPS + FEE_BPS);
         if (spend == 0) revert TradeTooSmall();
         (q, k) = _quoteBuyExactIn(q, b, chosen, spend);
         _checkSpread(q, b);
 
         balance = balance0 + absorbed - gross + spend;
-        fee = sellFee + buyFee;
-        collateral = amount - fee;
     }
 
     /// @dev Moves `shares` of `outcome` from the account to the maker, and leaves the IMD and the fee to the caller.
@@ -891,27 +930,28 @@ contract ConditionalsV2 is Ownable2Step, ReentrancyGuard, EIP712, IOracleAttesta
     {
         // Spread-checked like a buy: a sell that pushed an outcome more than MAX_SPREAD_B below the top would price a
         // whole world at zero and lock every buy and stake (audit 913c99ee). `exit` sells only what fits.
-        (int256[4] memory q, uint256 gross) = _quoteSell(m.q, m.b, outcome, shares);
+        (int256[4] memory q, uint256 gross) = _quote(m.q, m.b, outcome, -int256(shares));
         _checkSpread(q, m.b);
         uint256 absorbed = _absorb(q);
         if (gross > m.makerBalance + absorbed) revert InsufficientMaker();
-        _shares[marketId][account][outcome] -= shares;
+        _release(marketId, m, account, outcome, shares);
         m.q = q;
         m.sets -= absorbed;
         m.makerBalance = m.makerBalance + absorbed - gross;
         fee = _fee(gross);
         proceeds = gross - fee;
-        _addNet(marketId, m, account, -int256(gross));
     }
 
-    /// @dev Keeps `refundBase` equal to the sum of the positive `netIn` entries.
-    function _addNet(uint256 marketId, Market storage m, address account, int256 delta) internal {
-        int256 before = netIn[marketId][account];
-        int256 next = before + delta;
-        netIn[marketId][account] = next;
-        uint256 positiveBefore = before > 0 ? uint256(before) : 0;
-        uint256 positiveNext = next > 0 ? uint256(next) : 0;
-        m.refundBase = m.refundBase - positiveBefore + positiveNext;
+    /// @dev Takes `shares` of `outcome` from the account and releases their share of its cost basis: what they cost
+    ///      is no longer refundable, whatever they fetch. Selling all of a holding releases all of its basis.
+    function _release(uint256 marketId, Market storage m, address account, uint256 outcome, uint256 shares) internal {
+        uint256 held = _shares[marketId][account][outcome];
+        uint256 left = held - shares;
+        uint256 basis = _basis[marketId][account][outcome];
+        uint256 released = left == 0 ? basis : basis * shares / held;
+        _shares[marketId][account][outcome] = left;
+        _basis[marketId][account][outcome] = basis - released;
+        m.refundBase -= released;
     }
 
     function _fee(uint256 notional) internal pure returns (uint256) {
@@ -940,16 +980,28 @@ contract ConditionalsV2 is Ownable2Step, ReentrancyGuard, EIP712, IOracleAttesta
     function _cost(int256[4] memory q, uint256 b, bool up) internal pure returns (int256) {
         (int256 max, int256 sum) = _normalised(q, b);
         int256 c = max + FPM.sMulWad(int256(b), FPM.lnWad(sum));
-        int256 margin = (int256(b) / 1e18 + 1) * 16;
+        int256 margin = _margin(b);
         return up ? c + margin : c - margin;
+    }
+
+    /// @dev How far `_cost` moves its result from the fixed point's value, in wei.
+    function _margin(uint256 b) internal pure returns (int256) {
+        return (int256(b) / 1e18 + 1) * 16;
+    }
+
+    /// @dev The largest and smallest q.
+    function _range(int256[4] memory q) internal pure returns (int256 max, int256 min) {
+        max = q[0];
+        min = q[0];
+        for (uint256 i = 1; i < 4; ++i) {
+            if (q[i] > max) max = q[i];
+            if (q[i] < min) min = q[i];
+        }
     }
 
     /// @dev The largest q and the sum of exp((q_i - max) / b), which lies in [1e18, 4e18].
     function _normalised(int256[4] memory q, uint256 b) internal pure returns (int256 max, int256 sum) {
-        max = q[0];
-        for (uint256 i = 1; i < 4; ++i) {
-            if (q[i] > max) max = q[i];
-        }
+        (max,) = _range(q);
         for (uint256 i; i < 4; ++i) {
             sum += FPM.expWad(FPM.sDivWad(q[i] - max, int256(b)));
         }
@@ -966,10 +1018,7 @@ contract ConditionalsV2 is Ownable2Step, ReentrancyGuard, EIP712, IOracleAttesta
     ///      IMD: q moves up by the amount and C(q) with it, so prices do not change and the balance stays at least C(q),
     ///      which would otherwise fall below zero. The caller moves the amount from `sets` to `makerBalance`.
     function _absorb(int256[4] memory q) internal pure returns (uint256 absorbed) {
-        int256 max = q[0];
-        for (uint256 i = 1; i < 4; ++i) {
-            if (q[i] > max) max = q[i];
-        }
+        (int256 max,) = _range(q);
         if (max >= 0) return 0;
         for (uint256 i; i < 4; ++i) {
             q[i] -= max;
@@ -979,12 +1028,7 @@ contract ConditionalsV2 is Ownable2Step, ReentrancyGuard, EIP712, IOracleAttesta
 
     /// @dev Refuses a state where one outcome's price would fall below the fixed point's useful range.
     function _checkSpread(int256[4] memory q, uint256 b) internal pure {
-        int256 max = q[0];
-        int256 min = q[0];
-        for (uint256 i = 1; i < 4; ++i) {
-            if (q[i] > max) max = q[i];
-            if (q[i] < min) min = q[i];
-        }
+        (int256 max, int256 min) = _range(q);
         if (max - min > MAX_SPREAD_B * int256(b)) revert PriceLimit();
     }
 
@@ -1007,30 +1051,24 @@ contract ConditionalsV2 is Ownable2Step, ReentrancyGuard, EIP712, IOracleAttesta
         q[outcome] += delta;
     }
 
-    function _quoteBuy(int256[4] memory q0, uint256 b, uint256 outcome, uint256 shares)
+    /// @dev What moving `outcome` by `delta` costs the trader (a buy, delta > 0) or pays them (a sell, delta < 0): the
+    ///      cost after, rounded up, less the cost before, rounded down, or the reverse, so the maker never pays out
+    ///      the rounding.
+    function _quote(int256[4] memory q0, uint256 b, uint256 outcome, int256 delta)
         internal
         pure
-        returns (int256[4] memory q, uint256 cost)
+        returns (int256[4] memory q, uint256 amount)
     {
-        q = _moved(q0, outcome, int256(shares));
-        int256 c = _cost(q, b, true) - _cost(q0, b, false);
+        q = _moved(q0, outcome, delta);
+        int256 c = delta > 0 ? _cost(q, b, true) - _cost(q0, b, false) : _cost(q0, b, false) - _cost(q, b, true);
         if (c <= 0) revert TradeTooSmall();
-        cost = uint256(c);
-    }
-
-    function _quoteSell(int256[4] memory q0, uint256 b, uint256 outcome, uint256 shares)
-        internal
-        pure
-        returns (int256[4] memory q, uint256 gross)
-    {
-        q = _moved(q0, outcome, -int256(shares));
-        int256 c = _cost(q0, b, false) - _cost(q, b, true);
-        if (c <= 0) revert TradeTooSmall();
-        gross = uint256(c);
+        amount = uint256(c);
     }
 
     /// @dev The shares `spend` buys of `outcome`, from the closed form
-    ///      k = b ln((S exp(x / b) - S + e) / e), rounded down until the true cost fits inside `spend`.
+    ///      k = b ln((S exp(x / b) - S + e) / e), rounded down until the quoted cost fits inside `spend`. Each cut is
+    ///      at least the shares whose cost at the entry price covers the two rounding margins, so a small spend at a
+    ///      low price fits in the tries as well as a large one (review 06e7064f).
     function _quoteBuyExactIn(int256[4] memory q0, uint256 b, uint256 outcome, uint256 spend)
         internal
         pure
@@ -1043,12 +1081,14 @@ contract ConditionalsV2 is Ownable2Step, ReentrancyGuard, EIP712, IOracleAttesta
         int256 grown = FPM.expWad(FPM.sDivWad(int256(spend), int256(b)));
         int256 ratio = FPM.sDivWad(FPM.sMulWad(sum, grown) - sum + e, e);
         k = uint256(FPM.sMulWad(int256(b), FPM.lnWad(ratio)));
+        uint256 step = 2 * uint256(_margin(b)) * uint256(sum) / uint256(e) + 1;
         k -= k / 1e9;
         for (uint256 tries;; ++tries) {
             if (k < 1e6 || tries == 4) revert TradeTooSmall();
             q = _moved(q0, outcome, int256(k));
             if (_cost(q, b, true) - _cost(q0, b, false) <= int256(spend)) return (q, k);
-            k -= k / 1e6 + 1;
+            uint256 cut = FPM.max(k / 1e6, step);
+            k = k > cut ? k - cut : 0;
         }
     }
 
@@ -1058,20 +1098,23 @@ contract ConditionalsV2 is Ownable2Step, ReentrancyGuard, EIP712, IOracleAttesta
 
     function _hashAttestation(Attestation calldata a) internal pure returns (bytes32) {
         return keccak256(
-            bytes.concat(
-                abi.encode(
-                    ATTESTATION_TYPEHASH,
-                    a.requestId,
-                    a.chainId,
-                    a.questionHash,
-                    a.answerType,
-                    keccak256(a.answer),
-                    a.figure,
-                    a.fromBlock
-                ),
-                abi.encode(
-                    a.toBlock, a.blockHash, a.panelJobId, a.panelSize, a.quorum, a.agreed, a.issuedAt, a.expiresAt
-                )
+            abi.encode(
+                ATTESTATION_TYPEHASH,
+                a.requestId,
+                a.chainId,
+                a.questionHash,
+                a.answerType,
+                keccak256(a.answer),
+                a.figure,
+                a.fromBlock,
+                a.toBlock,
+                a.blockHash,
+                a.panelJobId,
+                a.panelSize,
+                a.quorum,
+                a.agreed,
+                a.issuedAt,
+                a.expiresAt
             )
         );
     }
@@ -1105,16 +1148,14 @@ contract ConditionalsV2 is Ownable2Step, ReentrancyGuard, EIP712, IOracleAttesta
 
     /// @dev Canonical question document: compact JSON with sorted keys, as the oracle hashes it
     ///      (https://imd.fun/docs/#intake-binding-an-answer-to-its-request). Text is restricted to printable ASCII
-    ///      without quotes or backslashes, so it needs no escaping.
+    ///      without quotes or backslashes, so it needs no escaping. `chainId` is QUESTION_CHAIN_ID.
     function _questionDocument(uint256 marketId, Market storage m, uint8 q, uint256 windowBlock)
         internal
         view
         returns (string memory)
     {
         return string.concat(
-            "{\"answerType\":\"bool\",\"chainId\":",
-            QUESTION_CHAIN_ID.toString(),
-            ",\"definitions\":",
+            "{\"answerType\":\"bool\",\"chainId\":1,\"definitions\":",
             _definitions(m),
             ",\"evidence\":\"panel\",\"question\":\"",
             _questionText(marketId, m, q),
@@ -1130,9 +1171,7 @@ contract ConditionalsV2 is Ownable2Step, ReentrancyGuard, EIP712, IOracleAttesta
         returns (string memory)
     {
         return string.concat(
-            "{\"answerType\":\"bool\",\"chainId\":",
-            QUESTION_CHAIN_ID.toString(),
-            ",\"definitions\":",
+            "{\"answerType\":\"bool\",\"chainId\":1,\"definitions\":",
             _definitions(m),
             ",\"evidence\":\"panel\",\"panelSize\":",
             uint256(m.oracle.panelSize).toString(),
@@ -1153,22 +1192,15 @@ contract ConditionalsV2 is Ownable2Step, ReentrancyGuard, EIP712, IOracleAttesta
         return string.concat("{\"fromBlock\":", b, ",\"toBlock\":", b, "}");
     }
 
-    /// @dev 1 to maxLength bytes of printable ASCII (0x20-0x7e) without `"` or `\`.
-    function _validateText(string calldata text, uint256 maxLength) internal pure {
+    /// @dev 1 to maxLength bytes of printable ASCII (0x20-0x7e) without `"` or `\`. Reports whether it has a space.
+    function _validateText(string calldata text, uint256 maxLength) internal pure returns (bool hasSpace) {
         bytes calldata b = bytes(text);
         if (b.length == 0 || b.length > maxLength) revert InvalidText();
         for (uint256 i; i < b.length; ++i) {
             bytes1 c = b[i];
             if (c < 0x20 || c > 0x7e || c == 0x22 || c == 0x5c) revert InvalidText();
+            if (c == 0x20) hasSpace = true;
         }
-    }
-
-    function _hasSpace(string calldata text) internal pure returns (bool) {
-        bytes calldata b = bytes(text);
-        for (uint256 i; i < b.length; ++i) {
-            if (b[i] == 0x20) return true;
-        }
-        return false;
     }
 
     function _validateConfig(OracleConfig memory config) internal pure {

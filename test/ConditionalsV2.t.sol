@@ -98,9 +98,9 @@ contract ConditionalsV2Test is Fixture {
         uint256 before = imd.balanceOf(alice);
         _stake(alice, id, 0, 0, 10 ether);
         _resolve(id, true, false);
-        vm.prank(alice);
-        vm.expectRevert(ConditionalsV2.NothingToClaim.selector);
-        c.claim(id);
+        // A claim with nothing to pay returns 0 and changes nothing (it used to revert NothingToClaim).
+        assertEq(_claim(alice, id), 0);
+        assertFalse(c.claimed(id, alice));
         assertEq(imd.balanceOf(alice), before - 10 ether);
     }
 
@@ -322,9 +322,7 @@ contract ConditionalsV2Test is Fixture {
         assertLt(netAlice, 10 ether);
         assertEq(_claim(alice, id), uint256(netAlice));
         assertEq(_claim(bob, id), uint256(netBob));
-        vm.prank(carol);
-        vm.expectRevert(ConditionalsV2.NothingToClaim.selector);
-        c.claim(id);
+        assertEq(_claim(carol, id), 0, "no position, nothing to claim");
     }
 
     function test_void_paysTheCreatorLastAndProRataWhenShort() public {
@@ -343,9 +341,9 @@ contract ConditionalsV2Test is Fixture {
         assertLe(m.refundPool, m.refundBase);
         assertEq(imd.balanceOf(creator) - before, m.makerBalance + m.sets - m.refundPool + 1 ether);
         assertEq(_claim(bob, id), c.getMarket(id).refundPool * uint256(c.netIn(id, bob)) / m.refundBase);
-        vm.prank(alice);
-        vm.expectRevert(ConditionalsV2.NothingToClaim.selector);
-        c.claim(id);
+        // Alice sold everything: her gain is realised and nothing of hers is left to refund.
+        assertEq(c.netIn(id, alice), 0);
+        assertEq(_claim(alice, id), 0);
     }
 
     function test_void_waitsForALiveAsk() public {
@@ -625,7 +623,8 @@ contract ConditionalsV2Test is Fixture {
     }
 
     /// @dev Audit b37b3ab1: a live price above the snapshot used to make every ask revert, so the market could only
-    ///      void. The ask now pays the live price: from the budget while it lasts, then from the caller.
+    ///      void. The ask now pays the live price: from the budget while it lasts, then from the caller. Review
+    ///      fc599613: the budget is drawn down to zero and the caller pays only the shortfall.
     function test_audit_askPaysALivePriceAboveTheSnapshot() public {
         uint256 id = _create();
         _stake(alice, id, 0, 0, 1 ether);
@@ -633,9 +632,9 @@ contract ConditionalsV2Test is Fixture {
         uint256 before = imd.balanceOf(address(this));
         AskRef[] memory refs = _request(id);
         assertEq(refs.length, 2);
-        assertEq(before - imd.balanceOf(address(this)), 0.6 ether, "the budget covers one ask, the caller the other");
+        assertEq(before - imd.balanceOf(address(this)), 0.2 ether, "the budget pays 1 IMD, the caller the shortfall");
         assertEq(imd.balanceOf(intake.PAYEE()), 1.2 ether);
-        assertEq(c.getMarket(id).budget, 0.4 ether);
+        assertEq(c.getMarket(id).budget, 0);
         assertFalse(c.askable(id, 0));
         assertFalse(c.askable(id, 1));
         assertEq(imd.allowance(address(c), address(intake)), 0);
@@ -646,7 +645,208 @@ contract ConditionalsV2Test is Fixture {
         assertTrue(_answer(id, refs[1], true));
         c.settle(id);
         uint256 residual = uint256(int256(m.makerBalance) - m.q[0]);
-        assertEq(imd.balanceOf(creator) - creatorBefore, residual + 0.4 ether, "the unspent budget comes back");
+        assertEq(imd.balanceOf(creator) - creatorBefore, residual, "nothing of the budget is left to return");
+    }
+
+    /// @dev Review fc599613: a live price far above the snapshot. The first ask takes the whole budget and 9 IMD from
+    ///      the caller; the second is paid by the caller in full. No budget idles to be returned to the creator.
+    function test_review_askDrawsTheBudgetDownThenChargesTheCaller() public {
+        uint256 id = _create();
+        intake.setPrice(10 ether);
+        uint256 before = imd.balanceOf(address(this));
+        AskRef[] memory refs = _request(id);
+        assertEq(refs.length, 2);
+        assertEq(before - imd.balanceOf(address(this)), 19 ether);
+        assertEq(c.getMarket(id).budget, 0);
+        assertEq(imd.balanceOf(intake.PAYEE()), 20 ether);
+        assertEq(c.totalOracleSpend(), 20 ether);
+    }
+
+    /// @dev Review fc599613 (b): with a live price below the snapshot the budget covers more than two asks, and a
+    ///      retry after a failure is paid from it while it lasts, as the NatSpec now says.
+    function test_review_retryIsPaidFromTheBudgetWhileItLasts() public {
+        uint256 id = _create();
+        intake.setPrice(0.25 ether);
+        AskRef[] memory refs = _request(id);
+        assertEq(c.getMarket(id).budget, 0.5 ether);
+        assertTrue(intake.fail(refs[0].requestId, 1, bytes32("body_refused")));
+        uint256 before = imd.balanceOf(alice);
+        vm.prank(alice);
+        assertEq(c.requestResolution(id), 1);
+        assertEq(imd.balanceOf(alice), before, "the budget still covers the retry");
+        assertEq(c.getMarket(id).budget, 0.25 ether);
+    }
+
+    // ---- review findings (void accounting) ----------------------------------------------------------------------
+
+    /// @dev Review d1218754: two accounts cycle the maker (B buys, A buys more, B sells at the top, A sells at the
+    ///      bottom) so that B banks A's loss. The pair ends with no shares. A void used to refund A's loss out of the
+    ///      seed and then out of honest stakers' refunds. Now a realised loss is not refundable: A has no position,
+    ///      so nothing; the honest staker gets its collateral back; the creator gets the seed back.
+    function test_review_voidDoesNotRefundRealisedLosses() public {
+        uint256 id = _create();
+        _stake(carol, id, 0, 0, 50 ether);
+        int256 honestNet = c.netIn(id, carol);
+        assertEq(c.getMarket(id).refundBase, uint256(honestNet));
+
+        uint256 startPair = imd.balanceOf(alice) + imd.balanceOf(bob);
+        for (uint256 i; i < 10; ++i) {
+            vm.prank(bob);
+            c.buy(id, 0, 10 ether, type(uint256).max);
+            vm.prank(alice);
+            c.buy(id, 0, 20 ether, type(uint256).max);
+            vm.prank(bob);
+            c.sell(id, 0, 10 ether, 0);
+            vm.prank(alice);
+            c.sell(id, 0, 20 ether, 0);
+        }
+        assertEq(c.sharesOf(id, alice)[0] + c.sharesOf(id, bob)[0], 0);
+        assertEq(c.netIn(id, alice), 0, "a realised loss is not a refund claim");
+        assertEq(c.netIn(id, bob), 0);
+        assertEq(c.getMarket(id).refundBase, uint256(honestNet), "only the honest position is refundable");
+        assertLt(imd.balanceOf(alice) + imd.balanceOf(bob), startPair, "the pair paid fees");
+
+        vm.warp(resolveTime + 30 days + 1);
+        uint256 creatorBefore = imd.balanceOf(creator);
+        ConditionalsV2.Market memory m = c.getMarket(id);
+        c.voidMarket(id);
+        assertGe(imd.balanceOf(creator) - creatorBefore, m.subsidy + 1 ether, "the creator gets the seed back");
+        assertEq(_claim(alice, id), 0);
+        assertEq(_claim(carol, id), uint256(honestNet), "the honest staker gets its collateral back");
+        assertLe(imd.balanceOf(alice) + imd.balanceOf(bob), startPair, "a void does not pay for wash trading");
+    }
+
+    /// @dev A void refunds what the shares still held cost. Selling part of a holding releases that part's share of
+    ///      its cost, whatever the sale fetched: a gain is kept by the seller, a loss is the seller's.
+    function test_review_voidRefundsTheCostOfSharesStillHeld() public {
+        uint256 id = _create();
+        vm.prank(alice);
+        (uint256 cost,) = c.buy(id, 0, 10 ether, type(uint256).max);
+        assertEq(c.netIn(id, alice), int256(cost));
+        // Bob pushes the price up, so Alice sells 4 of her 10 at a gain.
+        vm.prank(bob);
+        c.buy(id, 0, 30 ether, type(uint256).max);
+        vm.prank(alice);
+        uint256 proceeds = c.sell(id, 0, 4 ether, 0);
+        assertGt(proceeds, cost * 4 / 10, "sold at a gain");
+        uint256 left = cost - cost * 4 ether / 10 ether;
+        assertEq(c.netIn(id, alice), int256(left), "the 6 shares left keep their share of the cost");
+
+        vm.warp(resolveTime + 30 days + 1);
+        c.voidMarket(id);
+        ConditionalsV2.Market memory m = c.getMarket(id);
+        assertEq(m.refundPool, m.refundBase, "nothing is short");
+        assertEq(_claim(alice, id), left);
+        (uint256 bobCost,) = (uint256(c.netIn(id, bob)), 0);
+        assertEq(_claim(bob, id), bobCost);
+    }
+
+    /// @dev A stake's collateral is its refund claim, exactly. Its cost is spread over the three outcomes kept by their
+    ///      prices, so selling one leg later at the market realises about nothing and the rest stays refundable.
+    function test_review_stakeCostFollowsPrices() public {
+        uint256 id = _create();
+        _stake(bob, id, 1, 1, 20 ether); // moves the prices off 1/4 each
+        uint256 shares = _stake(alice, id, 0, 0, 10 ether);
+        int256 net = c.netIn(id, alice);
+        assertEq(uint256(net), c.getMarket(id).refundBase - uint256(c.netIn(id, bob)));
+        // The two other-world legs (10 shares each) carry about their market value: the split uses the prices before
+        // the stake, and the stake's own impact on the opposite side is in it, so it sits a little above the value at
+        // the prices after it. Selling them releases exactly that from the refund claim, whatever the sale fetches.
+        uint256[4] memory p = c.prices(id);
+        uint256 value = 10 ether * (p[2] + p[3]) / 1e18;
+        vm.startPrank(alice);
+        uint256 got = c.sell(id, 2, 10 ether, 0) + c.sell(id, 3, 10 ether, 0);
+        vm.stopPrank();
+        int256 later = c.netIn(id, alice);
+        uint256 released = uint256(net - later);
+        assertApproxEqRel(released, value, 0.1e18, "the legs carried about their market value");
+        assertGe(released, value);
+        assertLt(got, released, "impact and fees are the seller's, not the refund pool's");
+        assertEq(c.sharesOf(id, alice)[0], 10 ether + shares);
+        assertGt(later, 0);
+        // The chosen outcome carries the rest; selling it all leaves nothing refundable.
+        vm.prank(alice);
+        c.sell(id, 0, 10 ether + shares, 0);
+        assertEq(c.netIn(id, alice), 0);
+        assertEq(c.getMarket(id).refundBase, uint256(c.netIn(id, bob)));
+    }
+
+    /// @dev Exiting complete sets releases their cost from every outcome; whatever is left is still refundable.
+    function test_review_exitReleasesTheSetsCost() public {
+        uint256 id = _create();
+        _stake(alice, id, 0, 0, 10 ether);
+        vm.prank(alice);
+        c.buy(id, 1, 10 ether, type(uint256).max); // alice now holds at least 10 of every outcome
+        int256 before = c.netIn(id, alice);
+        uint256[4] memory held = c.sharesOf(id, alice);
+        vm.prank(alice);
+        c.exit(id, 0);
+        uint256[4] memory later = c.sharesOf(id, alice);
+        for (uint256 i; i < 4; ++i) {
+            assertLt(later[i], held[i]);
+        }
+        assertLt(c.netIn(id, alice), before);
+        assertEq(uint256(c.netIn(id, alice)), c.getMarket(id).refundBase);
+    }
+
+    function testFuzz_review_partialSellKeepsAShareOfTheCost(uint96 shares, uint96 sold, uint96 move) public {
+        shares = uint96(bound(shares, 2e15, 100 ether));
+        sold = uint96(bound(sold, 1e15, shares - 1e15));
+        move = uint96(bound(move, 1e15, 100 ether));
+        uint256 id = _create();
+        vm.prank(alice);
+        (uint256 cost,) = c.buy(id, 1, shares, type(uint256).max);
+        vm.prank(bob);
+        c.buy(id, 0, move, type(uint256).max);
+        vm.prank(alice);
+        c.sell(id, 1, sold, 0);
+        uint256 expected = cost - cost * sold / shares;
+        assertEq(uint256(c.netIn(id, alice)), expected);
+        assertLe(expected, cost);
+        assertEq(c.getMarket(id).refundBase, expected + uint256(c.netIn(id, bob)));
+    }
+
+    // ---- review findings (quotes and views) ---------------------------------------------------------------------
+
+    /// @dev Review 06e7064f: on a saturated market a small stake's proceeds could not fit the rounding margins within
+    ///      the exact-in quote's fixed cuts, so stakes far above MIN_TRADE reverted TradeTooSmall.
+    function test_review_smallStakeOnASaturatedMarket() public {
+        imd.mint(alice, 5_000 ether);
+        vm.prank(creator);
+        uint256 id = c.createMarket(CONDITION, OUTCOME, RULES, closeTime, resolveTime, 1 ether, 100 ether);
+        vm.prank(alice);
+        c.buy(id, 0, 1900 ether, type(uint256).max);
+        assertLt(c.prices(id)[1], 1e10, "the opposite side is nearly worthless");
+        uint256[3] memory amounts = [uint256(1e15), 1e16, 1e17];
+        for (uint256 i; i < 3; ++i) {
+            (uint256 quoted,) = c.quoteStake(id, 0, 0, amounts[i]);
+            uint256 got = _stake(bob, id, 0, 0, amounts[i]);
+            assertEq(got, quoted);
+            assertGt(got, 0);
+        }
+        _invariantsHold(id);
+    }
+
+    /// @dev Review 87a6c426: `claimable` counts an open market that `claim` would settle in the same call.
+    function test_review_claimableCountsASettleableMarket() public {
+        uint256 id = _create();
+        _stake(alice, id, 0, 0, 2 ether);
+        _resolve(id, true, true);
+        assertTrue(c.settleable(id));
+        assertEq(uint8(c.getMarket(id).status), uint8(ConditionalsV2.Status.Open));
+        uint256 expected = c.claimable(id, alice);
+        assertGt(expected, 0);
+        assertEq(c.claimable(id, bob), 0);
+        assertEq(_claim(alice, id), expected);
+        assertEq(c.claimable(id, alice), 0);
+    }
+
+    function test_review_claimableIsZeroWhileAnAnswerIsMissing() public {
+        uint256 id = _create();
+        _stake(alice, id, 0, 0, 2 ether);
+        AskRef[] memory refs = _request(id);
+        assertTrue(_answer(id, refs[0], true));
+        assertEq(c.claimable(id, alice), 0);
     }
 
     /// @dev A live price above MAX_PRICE is not paid: the snapshot is offered and the Intake refuses it.
