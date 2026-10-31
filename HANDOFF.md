@@ -9,12 +9,12 @@ haileymarshall). Push with `gh auth token --user UgwujaGeorge`; do not switch th
   308-redirect to it. Step 1 of the list below and the domain purchase are done.
 - Wallet funded: **16 IMD, ~0.0015 ETH** (read onchain 2026-10-31). Covers the 15.5 IMD high-end budget.
 - Frontend adjustments shipped: hero and fork fit a short screen (user views at ~1253x550, Windows 150% scaling; test
-  there), oracle chip under the title, fee card and hackathon link removed, "Built on IMD" replaced by "Any coin".
-  The user may send more adjustments.
+  there), oracle chip under the title, fee card, hackathon link and contract links removed, "Built on IMD" replaced by
+  a short "IMD" section. The user does not want the site to explain routing or how the app uses IMD. The user may send
+  more adjustments.
 - **New v2 requirement:** bet with ETH or stablecoins; the contract swaps to IMD in the same transaction, with a price
   limit, and pots, refunds and payouts stay in IMD (payouts in IMD is our assumption; the user has not objected). The
-  site shows this with a "Coming with v2" chip: **remove the chip in `Sections.tsx` only when it works**, and name the
-  supported coins instead of "stablecoins".
+  site names ETH and USDG with a "Coming with v2" chip: **remove the chip in `Sections.tsx` only when it works**.
 - Routes seen on DexScreener 2026-10-31: IMD/ETH ~$234k liquidity, IMD/USDG ~$25k, IMD ~$3.60. No usable USDC or USDT
   route found. Launch with ETH and USDG. Several tokens are named USDG: confirm the real address and allowlist only it.
 - Still open: deploy route (IMD launch recommended) and the 5 market topics.
