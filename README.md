@@ -64,10 +64,13 @@ to the outcome: "if the Clarity Act passes, ETH above $5k is 62%; if it doesn't,
   exactly an address or a 32-byte hex string. Lengths: condition and outcome up to 280 bytes, rules up to 500.
 - **Questions are public** and reach the oracle's agents as written. The oracle refuses ambiguous or unanswerable
   questions; such a market ends in a void.
-- **Price changes.** Each market pays at most the Intake price it was created with: an ask reads the Intake's live
-  price (`priceOf`) and pays it when it is lower, so a price cut is not overpaid from the creator's budget. If the
-  Intake raises its price, that market's asks revert and it is voided after 30 days; the caller of
-  `requestResolution` never pays more than the snapshot price.
+- **Price changes.** An ask reads the Intake's live price (`priceOf`) and pays it, up to `MAX_PRICE` (10 IMD), so a
+  price cut is not overpaid from the creator's budget. In ConditionalsV2 a price rise no longer strands a market: the
+  budget pays while it lasts and the caller of `requestResolution` pays the rest, as for a retry. A live price of
+  zero, above 10 IMD, or unreadable falls back to the market's snapshot price.
+- **Spread bound (ConditionalsV2).** No trade, sells included, may leave an outcome more than 20 b below the top
+  outcome, so every outcome keeps a price. `exit` sells only what fits; any shares it cannot sell stay with the
+  account (each is priced under about 2e-9 IMD) and a later `exit` or `sell` can sell them once the market moves.
 - **Close before it is known.** Staking is open until `closeTime`, which the creator chooses (at or before
   `resolveTime`). A market whose condition or outcome becomes public before `closeTime` can be staked on with that
   knowledge, as in any prediction market; creators should close trading before either can be known. The frontend

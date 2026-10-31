@@ -468,17 +468,25 @@ contract ConditionalsV2 is Ownable2Step, ReentrancyGuard, EIP712, IOracleAttesta
             if (held[i] < sets_) sets_ = held[i];
         }
         if (sets_ != 0) {
+            // Sets bought from the maker one outcome at a time are not in `sets`: the maker redeems those, which moves
+            // every q down by the same amount and C(q) with it, so prices do not change and makerBalance >= C(q).
+            uint256 minted = sets_ < m.sets ? sets_ : m.sets;
+            uint256 fromMaker = sets_ - minted;
             for (uint256 i; i < 4; ++i) {
                 held[i] -= sets_;
+                m.q[i] -= int256(fromMaker);
             }
-            m.sets -= sets_;
+            m.sets -= minted;
+            m.makerBalance -= fromMaker;
             _addNet(marketId, m, msg.sender, -int256(sets_));
             proceeds = sets_;
         }
         uint256 fee;
         for (uint8 i; i < 4; ++i) {
-            uint256 rest = held[i];
-            if (rest == 0) continue;
+            // Sells only as much as keeps the spread inside MAX_SPREAD_B; shares beyond it are worth under ~2e-9 IMD
+            // each and stay with the account.
+            uint256 rest = FPM.min(held[i], _sellRoom(m.q, m.b, i));
+            if (rest < MIN_TRADE) continue;
             (uint256 net, uint256 f) = _sell(marketId, m, msg.sender, i, rest);
             proceeds += net;
             fee += f;
@@ -723,14 +731,14 @@ contract ConditionalsV2 is Ownable2Step, ReentrancyGuard, EIP712, IOracleAttesta
         return true;
     }
 
-    /// @dev What an ask pays: the Intake's live price when it is below the market's snapshot (the Intake pulls
-    ///      exactly `amount`, so paying the snapshot would overpay), else the snapshot. A price above the snapshot
-    ///      is refused by the Intake and the market voids at voidAfter, as documented; the caller never pays more
-    ///      than the price the market was created with. An Intake without `priceOf` is charged the snapshot.
+    /// @dev What an ask pays: the Intake's live price, up to MAX_PRICE (the Intake pulls exactly `amount`). A price
+    ///      above the snapshot is paid from the budget while it lasts and then by the caller, as a retry is, so a
+    ///      price rise does not leave the market able only to void (audit b37b3ab1). An Intake without `priceOf`,
+    ///      or with a live price of zero or above MAX_PRICE, is charged the snapshot.
     function _askPrice(OracleConfig memory config) internal view returns (uint256 price) {
         price = config.price;
         try IIntakePrice(address(config.intake)).priceOf(config.action, address(imd)) returns (uint256 live) {
-            if (live != 0 && live < price) price = live;
+            if (live != 0 && live <= MAX_PRICE) price = live;
         } catch {}
     }
 
@@ -881,8 +889,10 @@ contract ConditionalsV2 is Ownable2Step, ReentrancyGuard, EIP712, IOracleAttesta
         internal
         returns (uint256 proceeds, uint256 fee)
     {
-        // No spread check: selling never relies on the closed form, and nobody should be stopped from leaving.
+        // Spread-checked like a buy: a sell that pushed an outcome more than MAX_SPREAD_B below the top would price a
+        // whole world at zero and lock every buy and stake (audit 913c99ee). `exit` sells only what fits.
         (int256[4] memory q, uint256 gross) = _quoteSell(m.q, m.b, outcome, shares);
+        _checkSpread(q, m.b);
         uint256 absorbed = _absorb(q);
         if (gross > m.makerBalance + absorbed) revert InsufficientMaker();
         _shares[marketId][account][outcome] -= shares;
@@ -976,6 +986,17 @@ contract ConditionalsV2 is Ownable2Step, ReentrancyGuard, EIP712, IOracleAttesta
             if (q[i] < min) min = q[i];
         }
         if (max - min > MAX_SPREAD_B * int256(b)) revert PriceLimit();
+    }
+
+    /// @dev The most of `outcome` that can be sold before it falls more than MAX_SPREAD_B below the other outcomes'
+    ///      top. Every other pair is already inside the spread, so this is the only bound a sell can break.
+    function _sellRoom(int256[4] memory q, uint256 b, uint256 outcome) internal pure returns (uint256) {
+        int256 top = type(int256).min;
+        for (uint256 i; i < 4; ++i) {
+            if (i != outcome && q[i] > top) top = q[i];
+        }
+        int256 room = q[outcome] - top + MAX_SPREAD_B * int256(b);
+        return room > 0 ? uint256(room) : 0;
     }
 
     /// @dev A copy of `q0` with `delta` added to one outcome. Assigning a memory array would only alias it.

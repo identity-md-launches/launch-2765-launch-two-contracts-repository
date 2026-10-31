@@ -1,207 +1,124 @@
-# Adaptation for the Robinhood Chain launch
+# Adaptation for the Robinhood Chain launch (ConditionalsV2)
 
-Launch kind `evm_contracts`, chain 4663. One contract, `src/Conditionals.sol:Conditionals`, constructor
-`(address owner, IERC20 imd, IIntake intake, address oracleSigner, address feeRecipient)`, all static values the
-manifest step fills (`$owner` for the owner; the brief names the other four). The constructor makes no external call,
-takes no ETH, and the contract has no proxy, DELEGATECALL, SELFDESTRUCT, pause, mint or admin power over stakes.
-`bytecode_hash = "none"` was already set. Runtime 18,661 bytes, init code 20,718 bytes (`forge build --sizes`).
+Launch kind `evm_contracts`, chain 4663, two contracts in this order:
 
-The launch rules required no change to the contract's constructor, ownership or configuration. Every change below
-comes from an audit finding that reproduced against the code as it arrived, and each is covered by a test.
+1. `src/ConditionalsV2.sol:ConditionalsV2`, constructor `(address owner = $owner, IERC20 imd =
+   0x5f7bb59365ce557c26dbcaa4ee9d39a4b95b7127, IIntake intake = 0xa43e6f75ee006411f79ac1c84120606c2330de82,
+   address oracleSigner = 0x5598aa9146215bc13eb26f2c692ad1461fd32982, address feeRecipient =
+   0x63bcf2d1483c7628d7d53704ff9c8199dc28d907)`.
+2. `src/ConditionalsZap.sol:ConditionalsZap`, constructor `(ConditionalsV2 conditionals = $contract:ConditionalsV2,
+   IPoolManager poolManager = 0x8366a39cc670b4001a1121b8f6a443a643e40951, IERC20 imd = 0x5f7b…7127, IERC20 usdg =
+   0x5fc5360d0400a0fd4f2af552add042d716f1d168)`.
+
+(The previous version of this file covered the v1 launch 2278, `legacy/`. It is still in git history.)
+
+## Launch rules: no change needed
+
+- Both constructors were already right for the factory: nonpayable, 5 and 4 static `address` arguments, no external
+  calls, no requirement that any address has code. The owner is the `owner_` argument (`Ownable(owner_)`), never
+  `msg.sender` or `tx.origin`. ConditionalsZap has no owner.
+- No token, mint, pause, freeze, blacklist, proxy, initializer, DELEGATECALL, CALLCODE or SELFDESTRUCT. Every
+  `transferFrom` is from `msg.sender`. No `abi.encodePacked`, and no Yul. Every library call is internal, so the
+  bytecode needs no linking. `bytecode_hash = "none"` was already set.
+- Rehearsed: both contracts deployed by CREATE2 in one test on an empty chain (chain id 4663) with the brief's
+  arguments. The runtimes are 24,433 bytes (ConditionalsV2) and 3,646 bytes (ConditionalsZap), both under 24,576,
+  and no forbidden opcode is reachable.
+
+No launch.json is written here: the manifest step owns it. `foundry.toml`, remappings, `lib/` and lockfiles are
+untouched.
 
 ## Audit findings
 
-### b48a22f9 (high) - world 1 was always settled to NO: fixed
+Each finding was reproduced against the code as it arrived, using the audit's proofs and the new tests below. Each
+new test fails on the original `src/ConditionalsV2.sol` and passes on this one.
 
-Reproduced: the audit's proof (`.imd/reads/proofs/Proof_b48a22f91316.t.sol`) failed on the original code and
-passes on this one (run from `test/scratch/`). `_settle` set `side = NO` whenever the condition was false,
-`_settleable` was true on the condition alone and `_askable` refused to ask the outcome once the condition was false,
-so every world-1 YES staker forfeited to NO whatever the outcome, with a 3% fee charged on a result the oracle never
-gave. The README table, the frontend and `impact()` all present world-1 YES as "the outcome happens although the
-condition does not", and the brief says "in the world that happened the winning side splits the pot", so the fix is
-the audit's option (a): both questions are always asked and both answers are needed; the condition picks the world,
-the outcome picks the winning side in either world.
+### 7011982a (low): `exit` underflowed `Market.sets`. Reproduced and fixed
 
-- `src/Conditionals.sol`: `_askable` no longer skips the outcome; `_settleable` needs both answers; `_settle` takes
-  the side from the outcome in both worlds. Header comment updated.
-- `test/Conditionals.t.sol`: `test_conditionFalseSettlesWithoutOutcome`, which encoded the bug, is replaced by
-  `test_conditionFalseWaitsForTheOutcome`, `test_conditionFalseOutcomeYes`, `test_conditionFalseOutcomeNo` and
-  `test_world1YesWinsWhenOutcomeTrue` (the audit's reproduction). `test_failureThenRetryPaidByCaller` now answers the
-  outcome too before settling.
-- `README.md` step 5, `frontend/src/lib/market.ts` (`settleable`, `askable`, `askCost`),
-  `frontend/src/hooks/useDemoMarkets.ts` (demo settlement) and `frontend/src/components/MarketDrawer.tsx` (the
-  resolution steps) say and do the same. The frontend was not built here (no `node_modules`); the edits are the
-  minimal mirror of the contract's rules.
+The proof fails on the original with panic 0x11 at `m.sets -= sets_`. A complete set bought from the maker one outcome
+at a time is backed by the maker, not by `sets`. `exit` now takes the redeemed sets from `sets` while they last.
+The rest are redeemed from the maker: every `q[i]` and `makerBalance` move down by the same amount. C(q) moves
+down by exactly that amount, so prices do not change and `makerBalance >= C(q)` still holds. `makerBalance` cannot
+underflow because the account holds those shares, so `q[i] >= fromMaker` for every i. The proof now passes (Bob
+gets exactly 1 IMD).
 
-### 3c993124 (low) - void while an answer is in flight: fixed
+- `src/ConditionalsV2.sol`: `exit`.
+- `test/ConditionalsV2.t.sol`: `test_audit_exitRedeemsSetsBoughtFromTheMaker` (the audit's scenario, with
+  unchanged prices and solvency checked) and `testFuzz_audit_exitAnyCompleteSet`. The fuzz test also settles to each
+  outcome and checks that the contract pays everything out.
 
-Reproduced: with an ask live, `voidMarket` succeeded one second after `voidAfter` and the answer that landed next
-was ignored. `voidMarket` now refuses while an unanswered question has an ask younger than `RETRY_DELAY` (one day)
-still live; after that the ask counts as lost, as it already did for retries. Since `requestResolution` is refused
-after `voidAfter`, a void is delayed by at most one day. New view `voidable(marketId)`.
+### 913c99ee (low): sells could price a world at zero. Reproduced and fixed
 
-- `src/Conditionals.sol`: `_voidable`, `voidable`, `voidMarket`.
-- `test/Conditionals.t.sol`: `test_cannotVoidWhileAnAskIsLive`, `test_voidAllowedOnceTheLiveAskIsStale`;
-  `test_cannotVoidASettleableMarket` checks the view. `test/ConditionalsInvariant.t.sol`: the handler voids through
-  `voidable`. `frontend/src/lib/market.ts`: `voidable`, used by `stage`.
+The proof fails on the original with `DivWadFailed`. The problem was wider than the audit described. With world 0 at
+zero, every buy and every stake in either world reverted `PriceLimit`, because `_checkSpread` is global, until
+someone sold world-1 shares. `_sell` now runs the same `_checkSpread` as buys and stakes. Every trade therefore
+keeps `max q - min q <= 20 b`, and every price stays above about 2e-9.
 
-### bf75158c (low) - the action id was a constant: fixed
+The original comment's reason for skipping the check was that nobody should be stopped from leaving. To keep that
+for `exit`, it sells each leftover outcome only up to `_sellRoom`, the amount that keeps the spread, and skips
+amounts below `MIN_TRADE`. The shares beyond that are worth under about 2e-9 IMD each. They stay with the account,
+and a later `exit` or `sell` can sell them once the market moves. `sell` reverts `PriceLimit` only for a sell that
+would break the bound. A smaller sell goes through.
 
-Reproduced: `ORACLE_ACTION` was hard-coded, so a retired action version could not be rotated in and every market
-would end in a void. `OracleConfig` gains `bytes32 action` (validated non-zero), snapshotted per market like the
-rest of the configuration and passed to `requestWithFailure`. The constructor starts at `oracle.request@oracle-1`
-(`ORACLE_ACTION` stays as that default). The owner rotates it on the same 3 day path; open markets keep theirs.
+Skipping dust below `MIN_TRADE` also removes the audit's side note (b84bec92) that a dust holding made `exit` revert
+`TradeTooSmall`.
 
-- `src/Conditionals.sol`: `OracleConfig.action`, constructor, `_ask`, `_validateConfig`.
-- `test/Conditionals.t.sol`: `test_rotatedActionIsUsedByNewMarkets`, `test_oracleConfigBounds` (zero action),
-  `test_createMarketTakesBudgetAndSnapshotsConfig`; `test/utils/Fixture.sol` `_config()`.
+The held proof cannot pass against this fix: it needs `sell(id, 0, 24e18, 0)` to succeed. On this tree it stops
+there with `PriceLimit`, which is the fix working. Its scenario is covered below.
 
-### d83d44e0 (low) - ECDSA-only signer check: fixed
+- `src/ConditionalsV2.sol`: `_sell` (spread check), `exit` (sells what fits), new `_sellRoom`.
+- `test/ConditionalsV2.t.sol`: `test_audit_sellCannotPriceAWorldAtZero` (the audit's scenario). The dump reverts and a
+  sell inside the spread works. `conditionals`, `quoteStake` and a stake on world 0 all work afterwards.
+  `test_audit_exitSellsWhatFitsTheSpread`: `exit` does not revert at the bound, keeps the unsellable shares, and a
+  second exit closes the position.
+- `test/ConditionalsV2Invariant.t.sol`: `invariant_spreadBounded`, which also calls `conditionals`. On the original
+  code the handler breaks it on its own.
+- `README.md`: "Spread bound".
 
-Reproduced: `tryRecover` against an EOA refuses any ERC-1271 signer, so the protocol's signer registry could never
-answer a market. Verification now uses OpenZeppelin `SignatureChecker.isValidSignatureNow`, which accepts an EOA's
-signature or a contract's ERC-1271 answer, as the protocol's `OracleAttestationConsumer` does. The second half of
-the suggestion, also accepting the current configuration's signer for older markets, was not taken: the brief
-says the owner "cannot touch stakes, answers or open markets", and a signer rotation that applied to open markets
-would let the owner settle them with a key of its choice after 3 days. Each market keeps its own signer; a
-registry is the rotation path (`test_rotatedSignerCannotAnswerAnOlderMarket` pins this).
+### b37b3ab1 (low): a live price above the snapshot stranded the market. Reproduced and fixed
 
-- `src/Conditionals.sol`: import and the signature check in `onOracleResult`; `attestationDigest` is public.
-- `test/Conditionals.t.sol`: `test_acceptsAnErc1271SignerRegistry` (rotation inside a registry, refusal of an
-  unlisted key, under the Intake's gas limit), `test_rejectsWrongSigner` (empty and garbage signatures),
-  `test_rotatedSignerCannotAnswerAnOlderMarket`. `test/utils/Mocks.sol`: `MockSignerRegistry`.
+The proof fails on the original with `PriceNotMet`. `_askPrice` now pays the Intake's live price whenever it is
+non-zero and at most `MAX_PRICE`, the 10 IMD bound that already applies to configurations. The existing `_ask` path
+does the rest: the budget pays while it covers the price, then the caller pays, exactly as a retry already
+charges the caller. The unspent budget still returns to the creator at settlement or void. An unreadable,
+zero or above-10-IMD live price falls back to the snapshot, as before. The proof now passes.
 
-### 30115fb4 (low) - createMarket pulled 2 x price with no cap: fixed
+This reverses v1's choice (d2cd6ea6 in the previous file) for ConditionalsV2. The audit reproduced it as a defect:
+with the old behaviour, a protocol price change voids every open market. Under the new one, the caller of
+`requestResolution` can be charged up to `MAX_PRICE` per ask. The question format, the body, the callback checks and
+the oracle flow are unchanged.
 
-Reproduced: with a 10 IMD price activated in the same block, `createMarket` pulled 20 IMD from a creator who
-approved the maximum. `createMarket` takes a sixth argument, `maxBudget`, and reverts `BudgetTooHigh(budget,
-maxBudget)` when the active configuration charges more.
+- `src/ConditionalsV2.sol`: `_askPrice` and its comment.
+- `test/ConditionalsV2.t.sol`: `test_audit_askPaysALivePriceAboveTheSnapshot` (0.6 IMD: the budget pays one ask and
+  the caller the other, both are answered and settle, and 0.4 IMD of budget returns). Also
+  `test_audit_askNeverPaysAboveMaxPrice` (10 IMD + 1 is refused, 10 IMD is paid). The existing
+  `test_oracle_budgetSpentThenReturned` (a lower price) is unchanged and passes.
+- `README.md`: "Price changes".
 
-- `src/Conditionals.sol`: `createMarket`, error `BudgetTooHigh`.
-- `test/Conditionals.t.sol`: `test_createRejectsBudgetAboveTheCreatorsCap`; every other call site passes the
-  deposit it expects. `test/ConditionalsFork.t.sol`, `test/ConditionalsInvariant.t.sol` likewise.
-  `frontend/src/hooks/useLiveMarkets.ts` passes the 1 IMD deposit it shows.
+### 34e17b7a (low): each market pins its signer. Confirmed, not changed
 
-## Revision: the independent review's findings
+Confirmed by reading the code (no audit proof was supplied): `onOracleResult` verifies only against `m.oracle.signer`,
+and that is snapshotted at creation. A market created under signer S1 therefore refuses an answer signed by S2
+after a rotation, and it ends in a void.
+This is what the brief requires: the answer needs "an EIP-712 signature … from the market's oracle signer". The owner
+"cannot touch trades, answers or open markets". If a rotated signer applied to open markets, the owner could settle
+them with a key of its choice after 3 days. Rotation without stranding markets is still possible:
+`SignatureChecker` accepts an ERC-1271 signer, so a market created with the protocol's signer registry as its signer
+follows the registry's rotations.
 
-Each finding was reproduced on the accepted tree before anything changed. Answers are in `.imd-responses.json`.
+### b84bec92 (info): coverage. Nothing to fix
 
-### b57733eb (medium) - a 0.001 IMD counter-stake charged the 3% fee on the winners' principal: fixed
+The only note in it that changed behaviour (dust below `MIN_TRADE` blocking `exit`) is handled under 913c99ee. The
+other note, that `a.requestId` is not consumed, was not changed. Retries are at least `RETRY_DELAY` apart, so two
+asks never share a question hash and no replay is possible.
 
-Reproduced: the proof `Proof_b57733eb72d5.t.sol` failed on the accepted tree with `970000970000000000000 <
-1000000000000000000000`. `_settle` charged `BURN_BPS + BUILDER_BPS` on the whole pot whenever both pools were
-non-empty, so a MIN_STAKE on the empty side of a one-sided world cost the winners 3% of their own stake and paid the
-fee recipient 1% of it. The fee is now capped at the losing pool (`fee = min(3% of pot, losing pool)`, split 2:1
-between the burn and the fee recipient as before), the first of the finding's options: the brief's 3% of the pot
-stays wherever the losing side covers it, and a winner never nets less than they staked. The invariant
-`invariant_feesBounded` (fees at most 3% of what was staked) still holds.
+## Size
 
-The proof itself cannot pass against any fix: its lines 104-106 assert the defective amounts (`paid ==
-970000970000000000000`, the fee recipient paid 10.00001 IMD) and line 109 asserts `paid >= 1000 IMD`. On this tree it
-fails at line 104 with `1000000000000000000000 != 970000970000000000000`, which is the fixed payout. The finding is
-answered `disputed` for that reason, with the fix in place and the scenario covered by the suite.
-
-- `src/Conditionals.sol`: `_settle`; header comment.
-- `test/Conditionals.t.sol`: `test_feeIsCappedAtTheLosingPool` (the reviewer's scenario: the whale receives exactly
-  1000 IMD, the fee is the 0.001 IMD dust), `test_feeIsThreePercentOfThePotWhenTheLosingPoolCoversIt` (above and
-  exactly at the cap), `testFuzz_winnerNeverNetsLessThanStaked`.
-- `frontend/src/lib/market.ts` (`worldFee`, `multiple`, `estimatePayout`), `frontend/src/hooks/useDemoMarkets.ts`
-  (demo settlement) and `frontend/src/components/MarketDrawer.tsx` (fee copy) mirror the cap. `README.md` step 5.
-
-### 3425133b (low) - third-party pushes inside the stakers' transaction: fixed
-
-Reproduced with a mock IMD whose `_update` reverts for a blocked address (the live IMD answers `blocked(address)`):
-with the fee recipient blocked, `settle` and every `claim` reverted and `voidMarket` reverted `NotVoidable`; with
-the creator blocked and the budget unspent, `voidMarket` reverted. The burn, the fee and the budget return now go
-through `_push`, which tries the transfer and, if IMD refuses it, credits `owed[to]` and emits `PaymentDeferred`
-instead; the party collects it with `withdrawOwed()`. A staker's own claim is still a plain `safeTransfer`: IMD
-refusing a staker reverts that staker's claim only.
-
-- `src/Conditionals.sol`: `owed`, `withdrawOwed`, `_push`, `_settle`, `_returnBudget`, events `PaymentDeferred`
-  and `OwedWithdrawn`.
-- `test/utils/Mocks.sol`: `MockIMD.setBlocked`. `test/Conditionals.t.sol`:
-  `test_blockedFeeRecipientDoesNotBlockSettlement`, `test_blockedCreatorDoesNotBlockVoid`,
-  `test_blockedStakerOnlyBlocksTheirOwnClaim`. `README.md` step 5.
-
-### d2cd6ea6 (low) - asks paid the snapshot price, never the live one: fixed for a lower price
-
-Reproduced: with the Intake's price at 0.25 IMD the two asks still paid 1 IMD and the creator got nothing back.
-`_askPrice` now reads `priceOf(action, imd)` on the Intake and pays the live price when it is below the market's
-snapshot; the unspent budget comes back at settlement or void. The read is a `try`: an Intake without `priceOf` (a
-mock, an older version) is charged the snapshot, so a buyer's mock need not implement it. `priceOf` is declared in a
-separate `IIntakePrice` interface for the same reason (the proofs' mocks implement `IIntake`).
-
-A live price above the snapshot still reverts at the Intake and the market voids at `voidAfter`, as the README
-documented: the alternative, pulling the difference from the caller of `requestResolution`, would charge a
-volunteer an amount the Intake's owner sets, the pattern finding 30115fb4 asked to remove from `createMarket`.
-The caller never pays more than the snapshot (bounded by `MAX_PRICE`).
-
-- `src/Conditionals.sol`: `_askPrice`, `_ask`. `src/interfaces/IIntake.sol`: `IIntakePrice`.
-- `test/utils/Mocks.sol`: `MockIntake.price`, `setPrice`, `priceOf`, `setPriceOfReverts`.
-  `test/Conditionals.t.sol`: `test_askPaysTheLivePriceWhenItIsLower`, `test_askPaysTheSnapshotWithoutALivePrice`,
-  `test_askRevertsWhenTheLivePriceIsHigher`. `README.md` "Price changes".
-
-### 931492ce (low) - no `issuedAt` check: fixed
-
-Reproduced: an attestation with `issuedAt` a year ahead was accepted. `onOracleResult` now refuses
-`a.issuedAt > block.timestamp + ISSUED_AT_TOLERANCE` (5 minutes, the protocol consumer's constant) alongside the
-expiry check. The check stays inline rather than inheriting `OracleAttestationConsumer`, because the contract
-verifies against each market's snapshotted signer, not one owner-settable signer.
-
-- `src/Conditionals.sol`: `ISSUED_AT_TOLERANCE`, `onOracleResult`.
-- `test/Conditionals.t.sol`: `test_rejectsIssuedAtInTheFuture` (a year ahead and tolerance + 1 refused, exactly the
-  tolerance accepted). `README.md` "Answer freshness".
-
-### 17efe772 (low) - a pending configuration never expires: fixed with an activation window
-
-Reproduced: a proposal could be activated months after its delay, in the block a market was created. A proposal is
-now activatable only between `CONFIG_DELAY` and `CONFIG_DELAY + CONFIG_WINDOW` (7 days, a value the brief leaves
-open) after it was proposed; later it lapses (`ConfigExpired`) and must be proposed again, so every configuration a
-creator can meet was announced at most 10 days earlier. The finding's other option, a configuration pin in
-`createMarket`, was not taken: it changes the creator-facing ABI again for an exposure that is the creator's own 1
-IMD budget, and the brief gives the owner the choice of oracle for future markets.
-
-- `src/Conditionals.sol`: `CONFIG_WINDOW`, `ConfigExpired`, `activateOracleConfig`.
-- `test/Conditionals.t.sol`: `test_pendingConfigExpires`. `README.md` "No admin over markets".
-
-### 427f0607 (info) - `onFailure` NatSpec said RETRY_DELAY: fixed in the comment
-
-Reproduced: `_askable` allows an immediate re-ask after a failure, as the README and
-`test_failureThenRetryPaidByCaller` say; only the NatSpec said otherwise. The comment now matches the code; the
-caller pays the retry, so nobody else loses by an immediate re-ask.
-
-### f2b2f269, 1b5229b4, 167b3d1e (info) - not changed
-
-- Rounding dust: reproduced (at most winners - 1 wei per market, documented in the README). Paying the remainder to
-  the last claimant needs a count of unclaimed winners per market; not worth the storage for wei.
-- `claim()` by a non-staker settles then reverts `NothingToClaim`: reproduced; gas only, and `settle()` is the
-  function for settling without a payout. A `claim` that returns 0 for some callers and reverts for others would be
-  a worse interface.
-- `feeRecipient` read at settlement: reproduced; the brief gives the owner `setFeeRecipient`, the amount is fixed
-  by the contract and stakes are untouched. With b57733eb fixed the recipient has no lever on one-sided worlds.
-
-## Added for the oracle-consumer reference
-
-- `test/OracleConformance.t.sol`: the protocol's conformance vector adapted to this contract. Deployed at the
-  vector's address on chain 11155111, the contract reproduces the protocol's digest
-  (`0x95fefa8b...325c`), its callback selector is `0x510379c7`, the protocol's own signature verifies against that
-  digest the way the contract verifies it, and a fresh bool answer from the vector's key is accepted as the Intake
-  delivers it (the vector's `bytes32[]` answer is refused by design, as the reference allows). This needed the public
-  `attestationDigest` view above. The existing live-API question-hash vector is unchanged and still passes.
-- `frontend/src/lib/abi.ts` regenerated with `node frontend/scripts/gen-abi.mjs` from the new build.
-
-## Not changed
-
-- Constructor, ownership (`Ownable2Step` with the owner as an argument), fee split, burn address, panel and quorum
-  defaults, question document and request body (the live-API hash vector pins them), callback selectors.
-- `launch/` scripts and `launch/launch.template.json` are the requester's own tooling; no `launch.json` is written
-  here, as the manifest step owns it.
-- `foundry.toml`, `remappings`, `lib/`, `.gitmodules` and lockfiles: untouched, as required.
+ConditionalsV2's runtime went from 24,148 to 24,433 bytes (limit 24,576), with `optimizer_runs = 1` as configured.
 
 ## Checks run
 
-`forge build` and `forge test` with `FOUNDRY_FUZZ_SEED=0x454e988217fa2b344b583d22689e3faa5b48f3f8dea6fa7a68e7caa6cf942db6`:
-66 tests pass (60 unit and fuzz, 4 conformance, 1 invariant suite of 3 invariants, 1 fork test that returns without
-an RPC). The fork test (`FORK_ROBINHOOD=1`) was not run here; it needs the network. Runtime size 19,654 bytes.
-The held proof `Proof_b57733eb72d5.t.sol` fails on this tree at its own line 104 (see b57733eb above).
-`frontend/src/lib/abi.ts` was regenerated with `node frontend/scripts/gen-abi.mjs`.
+- `FOUNDRY_FUZZ_SEED=0x5d83227fee2096f4e9e1dfcdf39851d7320e2b9f2ba8471b17718ec60e88cbc5 forge test`: 57 tests pass.
+  That is 41 unit and fuzz tests, 1 invariant suite, 6 question and live-API hash vector tests, and 4 oracle
+  conformance tests. The 5 fork tests return without an RPC.
+- `FORK_ROBINHOOD=1 forge test --mc Fork`: all 5 fork tests pass against Robinhood Chain (the real Intake takes
+  the asks, and the zap stakes with ETH and USDG and honours `minImd`).

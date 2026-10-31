@@ -365,7 +365,8 @@ contract ConditionalsV2Test is Fixture {
     function test_oracle_badSignatureIsRefused() public {
         uint256 id = _create();
         AskRef[] memory refs = _request(id);
-        bool ok = _deliver(refs[0].requestId, _attestation(id, refs[0], true), _sign(_attestation(id, refs[0], true), 0xB0B));
+        bool ok =
+            _deliver(refs[0].requestId, _attestation(id, refs[0], true), _sign(_attestation(id, refs[0], true), 0xB0B));
         assertFalse(ok);
         assertEq(c.getMarket(id).answers[0], 0);
     }
@@ -377,7 +378,6 @@ contract ConditionalsV2Test is Fixture {
         a.questionHash = keccak256("other");
         assertFalse(_deliver(refs[0].requestId, a, _sign(a, signerKey)));
     }
-
 
     function test_oracle_failureAllowsAPaidRetry() public {
         uint256 id = _create();
@@ -498,5 +498,165 @@ contract ConditionalsV2Test is Fixture {
         vm.stopPrank();
         uint256[4] memory p = c.prices(id);
         assertApproxEqAbs(p[0] + p[1] + p[2] + p[3], 1 ether, 4);
+    }
+
+    // ---- audit findings --------------------------------------------------------------------------------------------
+
+    /// @dev Audit 7011982a: a complete set bought from the maker one outcome at a time is not counted in `sets`. The
+    ///      last account to exit used to underflow `m.sets`; the maker now redeems the sets it sold.
+    function test_audit_exitRedeemsSetsBoughtFromTheMaker() public {
+        uint256 id = _create();
+        vm.prank(alice);
+        c.stakeConditional(id, 0, 0, 10 ether, 0);
+        vm.prank(alice);
+        c.buy(id, 1, 10 ether, type(uint256).max);
+        for (uint8 i; i < 4; ++i) {
+            vm.prank(bob);
+            c.buy(id, i, 1 ether, type(uint256).max);
+        }
+        assertEq(c.getMarket(id).sets, 10 ether);
+        vm.prank(alice);
+        c.exit(id, 0);
+        assertEq(c.getMarket(id).sets, 0);
+
+        uint256[4] memory pricesBefore = c.prices(id);
+        ConditionalsV2.Market memory before = c.getMarket(id);
+        uint256 balance = imd.balanceOf(bob);
+        vm.prank(bob);
+        uint256 got = c.exit(id, 0);
+        assertEq(got, 1 ether, "a complete set redeems at 1 IMD, fee-free");
+        assertEq(imd.balanceOf(bob), balance + 1 ether);
+        ConditionalsV2.Market memory m = c.getMarket(id);
+        assertEq(m.makerBalance, before.makerBalance - 1 ether);
+        uint256[4] memory pricesAfter = c.prices(id);
+        for (uint256 i; i < 4; ++i) {
+            assertEq(m.q[i], before.q[i] - 1 ether);
+            assertEq(pricesAfter[i], pricesBefore[i], "redeeming a set does not move prices");
+            assertEq(c.sharesOf(id, bob)[i], 0);
+        }
+        _invariantsHold(id);
+        assertGe(imd.balanceOf(address(c)), m.makerBalance + m.sets + m.budget + c.owed(creator) + c.owed(builder));
+    }
+
+    /// @dev Audit 7011982a, fuzzed: any complete set bought from the maker can be redeemed by `exit` at 1 IMD, partly
+    ///      from minted sets and partly from the maker, and every outcome stays payable after.
+    function testFuzz_audit_exitAnyCompleteSet(uint96 b, uint96 staked, uint96 bought, uint8 settleTo) public {
+        uint256 liq = bound(b, 0.5 ether, 100 ether);
+        uint256 x = bound(staked, 0, 5 * liq);
+        uint256 y = bound(bought, 1e15, 3 * liq);
+        vm.prank(creator);
+        uint256 id = c.createMarket(CONDITION, OUTCOME, RULES, closeTime, resolveTime, 1 ether, liq);
+        imd.mint(bob, 1_000_000 ether);
+        if (x >= 1e15) _stake(alice, id, 0, 0, x);
+        for (uint8 i; i < 4; ++i) {
+            vm.prank(bob);
+            c.buy(id, i, y, type(uint256).max);
+        }
+        vm.prank(bob);
+        assertEq(c.exit(id, 0), y);
+        _invariantsHold(id);
+        _resolve(id, settleTo % 2 == 0, settleTo % 4 < 2);
+        c.settle(id);
+        uint256 owedAlice = c.claimable(id, alice);
+        if (owedAlice != 0) assertEq(_claim(alice, id), owedAlice);
+        assertLe(imd.balanceOf(address(c)), c.owed(creator) + c.owed(builder) + 16);
+    }
+
+    /// @dev Audit 913c99ee: dumping one world on the maker used to price it at exactly zero, after which
+    ///      `conditionals` reverted and every buy and stake reverted PriceLimit. Sells are now spread-checked.
+    function test_audit_sellCannotPriceAWorldAtZero() public {
+        vm.prank(creator);
+        uint256 id = c.createMarket(CONDITION, OUTCOME, RULES, closeTime, resolveTime, 1 ether, 0.5 ether);
+        imd.mint(alice, 10_000 ether);
+        vm.startPrank(alice);
+        for (uint256 i; i < 8; ++i) {
+            c.stakeConditional(id, 1, 0, 3 ether, 0);
+            c.sell(id, 2, c.sharesOf(id, alice)[2] - 3 ether * (i + 1), 0);
+            c.buy(id, 3, 3 ether, type(uint256).max);
+        }
+        vm.expectRevert(ConditionalsV2.PriceLimit.selector);
+        c.sell(id, 0, 24 ether, 0);
+        // Inside the spread the same holder sells as before.
+        c.sell(id, 0, 9 ether, 0);
+        vm.expectRevert(ConditionalsV2.PriceLimit.selector);
+        c.sell(id, 1, 24 ether, 0);
+        vm.stopPrank();
+
+        uint256[4] memory p = c.prices(id);
+        assertGt(p[0] + p[1], 0);
+        (uint256 yesIfCondition, uint256 yesIfNot) = c.conditionals(id);
+        assertLe(yesIfCondition, 1 ether);
+        assertLe(yesIfNot, 1 ether);
+        (uint256 shares,) = c.quoteStake(id, 0, 0, 1 ether);
+        assertGt(shares, 0);
+        _stake(bob, id, 0, 0, 1 ether);
+        _invariantsHold(id);
+    }
+
+    /// @dev Audit 913c99ee: `exit` sells only what keeps the spread, so the spread check cannot lock anyone out of
+    ///      `exit`; what it leaves is sold by a later exit once the market has moved.
+    function test_audit_exitSellsWhatFitsTheSpread() public {
+        vm.prank(creator);
+        uint256 id = c.createMarket(CONDITION, OUTCOME, RULES, closeTime, resolveTime, 1 ether, 0.5 ether);
+        _stake(alice, id, 1, 0, 3 ether);
+        vm.startPrank(bob);
+        c.buy(id, 3, 3 ether, type(uint256).max);
+        c.buy(id, 2, uint256(10 ether - c.getMarket(id).q[2]), type(uint256).max);
+        vm.stopPrank();
+        assertEq(c.getMarket(id).q[2], 10 ether, "outcome 2 is 20 b above outcomes 0 and 1");
+
+        vm.startPrank(alice);
+        vm.expectRevert(ConditionalsV2.PriceLimit.selector);
+        c.sell(id, 0, 3 ether, 0);
+        assertGt(c.exit(id, 0), 0);
+        uint256[4] memory held = c.sharesOf(id, alice);
+        assertEq(held[0], 3 ether, "kept: no room to sell");
+        assertEq(held[1], 3 ether, "kept: no room to sell");
+        assertEq(held[2], 0);
+        // Selling outcome 2 made room: the next exit closes the position.
+        assertGt(c.exit(id, 0), 0);
+        vm.stopPrank();
+        held = c.sharesOf(id, alice);
+        for (uint256 i; i < 4; ++i) {
+            assertEq(held[i], 0);
+        }
+        c.conditionals(id);
+        _invariantsHold(id);
+    }
+
+    /// @dev Audit b37b3ab1: a live price above the snapshot used to make every ask revert, so the market could only
+    ///      void. The ask now pays the live price: from the budget while it lasts, then from the caller.
+    function test_audit_askPaysALivePriceAboveTheSnapshot() public {
+        uint256 id = _create();
+        _stake(alice, id, 0, 0, 1 ether);
+        intake.setPrice(0.6 ether);
+        uint256 before = imd.balanceOf(address(this));
+        AskRef[] memory refs = _request(id);
+        assertEq(refs.length, 2);
+        assertEq(before - imd.balanceOf(address(this)), 0.6 ether, "the budget covers one ask, the caller the other");
+        assertEq(imd.balanceOf(intake.PAYEE()), 1.2 ether);
+        assertEq(c.getMarket(id).budget, 0.4 ether);
+        assertFalse(c.askable(id, 0));
+        assertFalse(c.askable(id, 1));
+        assertEq(imd.allowance(address(c), address(intake)), 0);
+
+        uint256 creatorBefore = imd.balanceOf(creator);
+        ConditionalsV2.Market memory m = c.getMarket(id);
+        assertTrue(_answer(id, refs[0], true));
+        assertTrue(_answer(id, refs[1], true));
+        c.settle(id);
+        uint256 residual = uint256(int256(m.makerBalance) - m.q[0]);
+        assertEq(imd.balanceOf(creator) - creatorBefore, residual + 0.4 ether, "the unspent budget comes back");
+    }
+
+    /// @dev A live price above MAX_PRICE is not paid: the snapshot is offered and the Intake refuses it.
+    function test_audit_askNeverPaysAboveMaxPrice() public {
+        uint256 id = _create();
+        intake.setPrice(10 ether + 1);
+        vm.warp(resolveTime);
+        vm.expectRevert(bytes("PriceNotMet"));
+        c.requestResolution(id);
+        intake.setPrice(10 ether);
+        assertEq(c.requestResolution(id), 2);
     }
 }

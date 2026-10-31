@@ -122,6 +122,20 @@ contract ConditionalsV2InvariantTest is Test {
         assertApproxEqAbs(p[0] + p[1] + p[2] + p[3], 1 ether, 4);
     }
 
+    /// @dev No sell, buy, stake or exit leaves an outcome more than 20 b below the top (audit 913c99ee), so every
+    ///      world keeps a price and `conditionals` never divides by zero.
+    function invariant_spreadBounded() public view {
+        ConditionalsV2.Market memory m = c.getMarket(id);
+        int256 max = m.q[0];
+        int256 min = m.q[0];
+        for (uint256 i = 1; i < 4; ++i) {
+            if (m.q[i] > max) max = m.q[i];
+            if (m.q[i] < min) min = m.q[i];
+        }
+        assertLe(max - min, 20 * int256(m.b));
+        c.conditionals(id);
+    }
+
     /// @dev Every winner can be paid in full, whichever outcome happens.
     function invariant_everyOutcomeIsPayable() public view {
         ConditionalsV2.Market memory m = c.getMarket(id);
