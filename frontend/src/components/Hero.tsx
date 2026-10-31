@@ -54,8 +54,9 @@ export function Hero({ onCreate }: { onCreate: () => void }) {
             className="animate-rise mt-5 max-w-xl text-lg leading-relaxed text-ink-2 sm:text-xl"
             style={{ animationDelay: "0.3s" }}
           >
-            Conditional markets in IMD. Price what an outcome is worth <span className="text-sun">if</span> an event
-            happens, and <span className="text-moon">if it doesn&apos;t</span>. The world that doesn&apos;t happen is
+            Conditional markets. Price what an outcome is worth{" "}
+            <span className="text-sun">if an event happens</span>, and{" "}
+            <span className="text-moon">if it doesn&apos;t</span>. The world that doesn&apos;t happen is
             refunded. Every fee burns IMD.
           </p>
           <div className="animate-rise mt-7 flex flex-wrap gap-3" style={{ animationDelay: "0.45s" }}>
