@@ -56,8 +56,8 @@ export function ForkCanvas({ bias = 0.5, className = "" }: { bias?: number; clas
     const geometry = () => {
       // Wide screens: the fork sits right of the headline. Narrow: below the buttons.
       const narrow = W < 760;
-      const fork: Pt = { x: W * (narrow ? 0.22 : 0.6), y: H * (narrow ? 0.84 : 0.56) };
-      const spread = H * (narrow ? 0.09 : 0.34);
+      const fork: Pt = { x: W * (narrow ? 0.22 : 0.6), y: H * (narrow ? 0.84 : 0.47) };
+      const spread = H * (narrow ? 0.09 : 0.3);
       const tilt = (pointer - 0.5) * H * 0.08;
       const endA: Pt = { x: W * 1.04, y: fork.y - spread + tilt };
       const endB: Pt = { x: W * 1.04, y: fork.y + spread * 0.9 + tilt };

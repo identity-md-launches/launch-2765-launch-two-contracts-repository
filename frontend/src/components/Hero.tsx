@@ -19,19 +19,19 @@ export function Hero({ onCreate }: { onCreate: () => void }) {
       </div>
 
       {/* World labels sit on the branches. */}
-      <div className="pointer-events-none absolute right-6 top-[17%] hidden text-right lg:block">
+      <div className="pointer-events-none absolute right-6 top-[14%] hidden text-right lg:block">
         <p className="eyebrow !text-sun/80">World A</p>
         <p className="font-display text-3xl italic text-sun">it happens</p>
       </div>
-      <div className="pointer-events-none absolute bottom-[14%] right-6 hidden text-right lg:block">
+      <div className="pointer-events-none absolute bottom-[22%] right-6 hidden text-right lg:block">
         <p className="eyebrow !text-moon/80">World B</p>
         <p className="font-display text-3xl italic text-moon">it doesn&apos;t</p>
       </div>
 
-      <div className="mx-auto flex w-full max-w-7xl flex-1 flex-col justify-center px-4 pb-28 pt-28 sm:px-6">
+      <div className="mx-auto flex w-full max-w-7xl flex-1 flex-col justify-center px-4 pb-8 pt-24 sm:px-6">
         <div className="max-w-3xl">
           <h1
-            className="animate-rise flex items-center gap-[0.18em] font-display text-[clamp(3.4rem,10vw,8rem)] leading-none tracking-[-0.02em]"
+            className="animate-rise flex items-center gap-[0.18em] font-display text-[clamp(3.4rem,min(10vw,15svh),8rem)] leading-none tracking-[-0.02em]"
             style={{ animationDelay: "0.15s" }}
           >
             <span className="inline-block h-[0.82em] w-[0.82em] shrink-0">
@@ -39,26 +39,26 @@ export function Hero({ onCreate }: { onCreate: () => void }) {
             </span>
             Conditionals
           </h1>
-          <p
-            className="animate-rise mt-4 font-display text-[clamp(1.6rem,3.6vw,2.8rem)] italic leading-tight"
-            style={{ animationDelay: "0.22s" }}
-          >
-            <span className="text-split-grad pr-1">Trade the world where it happens.</span>
-          </p>
-          <div className="animate-rise mt-5" style={{ animationDelay: "0.26s" }}>
+          <div className="animate-rise mt-4" style={{ animationDelay: "0.22s" }}>
             <span className="chip">
               <span className="h-1.5 w-1.5 animate-pulse-slow rounded-full bg-good" /> Settled by IMD oracle
             </span>
           </div>
           <p
-            className="animate-rise mt-7 max-w-xl text-lg leading-relaxed text-ink-2 sm:text-xl"
+            className="animate-rise mt-4 font-display text-[clamp(1.6rem,3.6vw,2.8rem)] italic leading-tight"
+            style={{ animationDelay: "0.26s" }}
+          >
+            <span className="text-split-grad pr-1">Trade the world where it happens.</span>
+          </p>
+          <p
+            className="animate-rise mt-5 max-w-xl text-lg leading-relaxed text-ink-2 sm:text-xl"
             style={{ animationDelay: "0.3s" }}
           >
             Conditional markets in IMD. Price what an outcome is worth <span className="text-sun">if</span> an event
             happens, and <span className="text-moon">if it doesn&apos;t</span>. The world that doesn&apos;t happen is
             refunded. Every fee burns IMD.
           </p>
-          <div className="animate-rise mt-10 flex flex-wrap gap-3" style={{ animationDelay: "0.45s" }}>
+          <div className="animate-rise mt-7 flex flex-wrap gap-3" style={{ animationDelay: "0.45s" }}>
             <a href="#markets" className="btn btn-primary">
               Enter the markets <ArrowIcon className="h-4 w-4" />
             </a>
