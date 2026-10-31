@@ -6,7 +6,7 @@ import { AnimatePresence, motion } from "motion/react";
 import { useMarkets } from "./Providers";
 import { StageChip } from "./MarketCard";
 import { FlameIcon, OracleIcon } from "./Glyphs";
-import { ADDRESSES, LINKS, RULES } from "@/lib/config";
+import { ADDRESSES, RULES } from "@/lib/config";
 import { fmtCountdown, fmtDate, fmtImd, fmtPct, fmtPts, short } from "@/lib/format";
 import {
   askable,
@@ -470,11 +470,6 @@ function Details({ m }: { m: MarketView }) {
             Burned <span className="num text-ink">{fmtImd((pot * RULES.burnBps) / 10_000)} IMD</span> from this market.
           </span>
         </div>
-      )}
-      {ADDRESSES.conditionals && (
-        <a href={`${LINKS.explorer}/address/${ADDRESSES.conditionals}`} target="_blank" rel="noreferrer" className="block text-xs text-mute hover:text-ink">
-          View the contract on Blockscout ↗
-        </a>
       )}
     </div>
   );

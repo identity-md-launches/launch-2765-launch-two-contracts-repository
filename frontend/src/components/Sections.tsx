@@ -4,8 +4,7 @@ import Link from "next/link";
 
 import { Logo } from "./Glyphs";
 import { useMarkets } from "./Providers";
-import { ADDRESSES, LINKS } from "@/lib/config";
-import { short } from "@/lib/format";
+import { LINKS } from "@/lib/config";
 
 const STEPS = [
   {
@@ -78,43 +77,35 @@ function StepGlyph({ i }: { i: number }) {
   );
 }
 
-const COIN_CARDS = [
+const IMD_CARDS = [
   {
     dot: "bg-sun shadow-[0_0_16px_#FFB547]",
-    title: "Use what you hold",
-    body: "Bet with ETH or stablecoins straight from your wallet. There's nothing to buy first.",
+    title: "Bets are made in IMD",
+    body: "Every market, pot and payout is in IMD.",
+    soon: false,
   },
   {
     dot: "bg-moon shadow-[0_0_16px_#7DE3FF]",
-    title: "Routed automatically",
-    body: "Your coin is swapped into IMD in the same transaction as your bet, with a price limit you can see before you confirm.",
-  },
-  {
-    dot: "bg-ink shadow-[0_0_16px_#F3EFE7]",
-    title: "Settled in IMD",
-    body: "Every market runs on IMD underneath, so pots, refunds and payouts are all paid in IMD.",
+    title: "Place bets with ETH or USDG",
+    body: "Use the ETH or USDG in your wallet to place a bet.",
+    soon: true,
   },
 ];
 
-export function AnyCoinSection() {
+export function ImdSection() {
   return (
-    <section id="coins" className="mx-auto mt-32 max-w-7xl scroll-mt-20 px-4 sm:mt-44 sm:px-6">
+    <section id="imd" className="mx-auto mt-32 max-w-7xl scroll-mt-20 px-4 sm:mt-44 sm:px-6">
       <div className="grid gap-10 lg:grid-cols-[1fr_1.4fr]">
-        <div>
-          <p className="eyebrow">Any coin</p>
-          <h2 className="mt-3 font-display text-5xl leading-[1.02] sm:text-6xl">
-            Bet with any coin. <em className="text-moon-grad">It all routes to IMD.</em>
-          </h2>
-          <div className="mt-6">
-            <span className="chip">Coming with v2</span>
-          </div>
-        </div>
-        <div className="grid gap-4">
-          {COIN_CARDS.map((c) => (
+        <h2 className="font-display text-5xl leading-[1.02] sm:text-6xl">
+          <em className="text-moon-grad">IMD</em>
+        </h2>
+        <div className="grid gap-4 sm:grid-cols-2">
+          {IMD_CARDS.map((c) => (
             <div key={c.title} className="panel p-6">
               <span className={`block h-3 w-3 rounded-full ${c.dot}`} />
               <h3 className="mt-5 text-lg">{c.title}</h3>
               <p className="mt-2 text-sm leading-relaxed text-ink-2">{c.body}</p>
+              {c.soon && <span className="chip mt-4">Coming with v2</span>}
             </div>
           ))}
         </div>
@@ -137,11 +128,6 @@ export function Footer() {
           </p>
         </div>
         <div className="flex flex-wrap gap-x-8 gap-y-3 text-sm text-ink-2">
-          {ADDRESSES.conditionals && (
-            <a href={`${LINKS.explorer}/address/${ADDRESSES.conditionals}`} target="_blank" rel="noreferrer" className="hover:text-ink">
-              Contract {short(ADDRESSES.conditionals)}
-            </a>
-          )}
           <Link href="/docs" className="hover:text-ink">
             Docs
           </Link>

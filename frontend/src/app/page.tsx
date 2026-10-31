@@ -8,7 +8,7 @@ import { Header } from "@/components/Header";
 import { Hero } from "@/components/Hero";
 import { MarketDrawer } from "@/components/MarketDrawer";
 import { Markets } from "@/components/Markets";
-import { AnyCoinSection, Footer, HowItWorks, Toast } from "@/components/Sections";
+import { Footer, HowItWorks, ImdSection, Toast } from "@/components/Sections";
 import { Stats } from "@/components/Stats";
 import { useNow } from "@/hooks/useNow";
 
@@ -51,7 +51,7 @@ export default function Home() {
         <Featured now={now} />
         <Markets now={now} onCreate={create} />
         <HowItWorks />
-        <AnyCoinSection />
+        <ImdSection />
       </main>
       <Footer />
       <MarketDrawer id={marketId} now={now} onClose={closeMarket} />

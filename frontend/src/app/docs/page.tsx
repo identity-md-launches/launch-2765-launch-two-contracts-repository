@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import Link from "next/link";
 
 import { Logo } from "@/components/Glyphs";
-import { ADDRESSES, LINKS } from "@/lib/config";
+import { LINKS } from "@/lib/config";
 
 export const metadata: Metadata = {
   title: "Whitepaper · Conditionals",
@@ -306,11 +306,6 @@ export default function Docs() {
         </section>
 
         <div className="mt-14 flex flex-wrap gap-x-8 gap-y-3 text-sm text-ink-2">
-          {ADDRESSES.conditionals && (
-            <a href={`${LINKS.explorer}/address/${ADDRESSES.conditionals}`} target="_blank" rel="noreferrer" className="hover:text-ink">
-              Contract
-            </a>
-          )}
           <a href={LINKS.github} target="_blank" rel="noreferrer" className="hover:text-ink">
             GitHub
           </a>
