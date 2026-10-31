@@ -242,17 +242,58 @@ The two fixes added about 360 bytes. To make room, the question document and the
 `_documents` from shared parts (the same JSON strings, so the hash vectors, including the live-API one, are
 unchanged), and `_ask` builds them once instead of twice. Runtime: 24,541 bytes.
 
+## Review findings (third revision)
+
+A third independent review reopened the work with one finding, reproduced with the reviewer's proof on the accepted
+tree and fixed. The answer is in `.imd-responses.json`.
+
+### 0b859a73 (medium): a short void could refund more than the cost. Reproduced and fixed
+
+`Proof_0b859a733266` failed on the accepted tree: Carol (net in 165.72 IMD) was refunded 184.30 and Dave (a staker,
+net in 99.78) 103.61, both out of Alice's refund. The short-void rule from bf61cff9 paid each account between its
+value at the final prices (v) and its cost (c). When v > c (an outcome bought cheap whose price was later pumped,
+or a staker whose complete sets gained from a pump), "between" is above the cost, which breaks the brief's rule
+that a void returns "net IMD in back excluding fees, pro rata if short", and lets a trader who expects a void pump
+an outcome it holds for a profit paid by other accounts.
+
+`_payout` now clips v at the cost before the interpolation (`v = FPM.min(v, net)`). With u = min(v, c) an account is
+paid `(u * S + c * (pool - V)) / (refundBase - V)`, which is at most `c * (refundBase - V) / (refundBase - V) = c`,
+and the sum over accounts is at most `(V * S + refundBase * (pool - V)) / (refundBase - V) = pool`, since the sum of
+u is at most V. The rounding branch (`total >= pool`) pays `u * pool / total`, at most c as well. So every refund is
+at most the cost, the refunds still fit in the pool, a position worth its cost (a stake's complete sets) is still
+refunded in full, and the shortfall still falls on cost the position's value does not back. A void that is not
+short is unchanged: every account gets its cost.
+
+What the cap costs: in a short void where some position is worth more than its cost, the refunds no longer add up
+to the whole pool, and the difference stays in the contract (in the proof's scenario 22.42 IMD of a 324.54 IMD pool,
+against Alice's 73.02 IMD of cost, of which she is refunded 36.62).
+Redistributing it would need the sum of the clipped values over every account, which the contract cannot compute
+without a list of accounts, and the runtime has 21 bytes left. The creator is still paid last (`balance - pool`,
+zero when short), so this is IMD no account had a claim to under the brief's rule rather than a loss to anyone.
+
+- `src/ConditionalsV2.sol`: `_payout` (one line and its comment).
+- `test/ConditionalsV2.t.sol`: `test_review_shortVoidNeverPaysAboveCost` (the proof's scenario: every refund at
+  most the cost, Carol and Dave exactly at cost, Alice below it, the total within the pool), and
+  `testFuzz_review_voidPaysEveryClaimWithinThePool` now also asserts every claim is at most `netIn` when short.
+  `test_review_voidShortfallFallsOnUnbackedCost` (bf61cff9) and `test_void_paysTheCreatorLastAndProRataWhenShort`
+  pass unchanged.
+- `README.md`: "Void refunds".
+
 ## Size
 
-ConditionalsV2's runtime is 24,541 bytes (limit 24,576), with `optimizer_runs = 1` as configured. It was 24,148 as
-it arrived, 24,433 after the audit fixes and 24,490 after the first revision.
+ConditionalsV2's runtime is 24,555 bytes (limit 24,576), with `optimizer_runs = 1` as configured. It was 24,148 as
+it arrived, 24,433 after the audit fixes, 24,490 after the first revision and 24,541 after the second.
 
 ## Checks run
 
-- `FOUNDRY_FUZZ_SEED=0x5d83227fee2096f4e9e1dfcdf39851d7320e2b9f2ba8471b17718ec60e88cbc5 forge test`: 73 tests pass.
-  That is 54 unit and fuzz tests, 1 invariant suite, 6 question and live-API hash vector tests, 4 oracle
+- `FOUNDRY_FUZZ_SEED=0x5d83227fee2096f4e9e1dfcdf39851d7320e2b9f2ba8471b17718ec60e88cbc5 forge test`: 74 tests pass.
+  That is 55 unit and fuzz tests, 1 invariant suite, 6 question and live-API hash vector tests, 4 oracle
   conformance tests, and the launch rehearsal. The 5 fork tests return without an RPC.
-- The second review's proofs `Proof_e665f90a9e1f.t.sol` and `Proof_bf61cff9dc2b.t.sol` pass on this tree.
+- The third review's proof `Proof_0b859a733266.t.sol` passes on this tree (Carol and Dave are refunded exactly their
+  net in).
+- The second review's proofs `Proof_e665f90a9e1f.t.sol` and `Proof_bf61cff9dc2b.t.sol` are no longer supplied on
+  this machine. Their scenarios are the suite's `test_review_buyAboveInt256MaxReverts` and
+  `test_review_voidShortfallFallsOnUnbackedCost`, which pass unchanged.
 - The first review's proof `Proof_d1218754d210.t.sol` passes on this tree, as do `Proof_7011982acbf0` and
   `Proof_b37b3ab115a8`. `Proof_913c99ee0269` still stops at `PriceLimit`, which is the fix working (see above).
 - `FORK_ROBINHOOD=1 forge test --mc Fork`: all 5 fork tests pass against Robinhood Chain (the real Intake takes

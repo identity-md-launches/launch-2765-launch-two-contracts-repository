@@ -913,8 +913,46 @@ contract ConditionalsV2Test is Fixture {
         assertLe(imd.balanceOf(alice) + imd.balanceOf(bob), pairStart + m.subsidy, "the pair takes at most the seed");
     }
 
-    /// @dev Whatever the trades, a void pays every claim, in total at most the pool, and exactly the cost when it
-    ///      is not short.
+    /// @dev Review 0b859a73: a short void must never refund an account more than it paid in. Carol pumps outcomes 0 and
+    ///      2 and sells most of 0 back, so her remaining position is worth more at the final prices than it cost, and
+    ///      Dave's stake is worth more too. Before the fix both were paid above their cost, out of Alice's refund.
+    function test_review_shortVoidNeverPaysAboveCost() public {
+        uint256 id = _create();
+        _stake(dave, id, 1, 0, 100 ether);
+        vm.prank(alice);
+        c.buy(id, 3, 199.999 ether, type(uint256).max);
+        vm.startPrank(carol);
+        c.buy(id, 0, 199.999 ether, type(uint256).max);
+        c.buy(id, 2, 199.999 ether, type(uint256).max);
+        c.buy(id, 0, 199.999 ether, type(uint256).max);
+        c.sell(id, 0, 192.5 ether, 0);
+        vm.stopPrank();
+
+        vm.warp(resolveTime + 30 days + 1);
+        c.voidMarket(id);
+        ConditionalsV2.Market memory m = c.getMarket(id);
+        assertLt(m.refundPool, m.refundBase, "the void is short");
+
+        uint256 carolNet = uint256(c.netIn(id, carol));
+        uint256 daveNet = uint256(c.netIn(id, dave));
+        uint256 aliceNet = uint256(c.netIn(id, alice));
+        uint256 carolPaid = _claim(carol, id);
+        uint256 davePaid = _claim(dave, id);
+        uint256 alicePaid = _claim(alice, id);
+        assertLe(carolPaid, carolNet, "a short void never refunds carol more than she paid in");
+        assertLe(davePaid, daveNet, "a short void never refunds dave more than he paid in");
+        assertLe(alicePaid, aliceNet, "a short void never refunds alice more than she paid in");
+        // Carol's position and Dave's complete sets are worth at least their cost at the final prices, so both are
+        // refunded exactly at cost. Alice, whose cost the pool does not back, takes the whole shortfall.
+        assertEq(carolPaid, carolNet);
+        assertEq(davePaid, daveNet);
+        assertLt(alicePaid, aliceNet);
+        assertLe(carolPaid + davePaid + alicePaid, m.refundPool, "the payouts fit in the pool");
+        assertGe(imd.balanceOf(address(c)), c.owed(creator) + c.owed(builder));
+    }
+
+    /// @dev Whatever the trades, a void pays every claim, each at most the cost, in total at most the pool, and
+    ///      exactly the cost when it is not short.
     function testFuzz_review_voidPaysEveryClaimWithinThePool(uint96[6] memory sizes, uint8[6] memory outcomes) public {
         uint256 id = _create();
         _stake(dave, id, 0, 1, 50 ether);
@@ -943,6 +981,7 @@ contract ConditionalsV2Test is Fixture {
             uint256 net = uint256(c.netIn(id, all[i]));
             uint256 paid = _claim(all[i], id);
             if (m.refundPool == m.refundBase) assertEq(paid, net);
+            else assertLe(paid, net, "a short void never refunds more than the cost");
             total += paid;
         }
         assertLe(total, m.refundPool);

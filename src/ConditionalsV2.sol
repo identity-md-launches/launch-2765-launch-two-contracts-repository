@@ -846,6 +846,8 @@ contract ConditionalsV2 is Ownable2Step, ReentrancyGuard, EIP712, IOracleAttesta
         // Short (review bf61cff9): the market holds at least V, every position's value at the final prices, since
         // makerBalance >= C(q) >= sum p_i q_i. Each account is paid between its value v and its cost: the shortfall
         // falls on cost a position's value does not back, in proportion to it. The payouts sum to at most the pool.
+        // v is clipped at the cost (review 0b859a73): a void never refunds more than an account paid in, so a
+        // position worth more than it cost cannot take the excess from other accounts' refunds.
         uint256[4] memory p = _prices(m.q, m.b);
         uint256 v;
         uint256 total;
@@ -853,6 +855,7 @@ contract ConditionalsV2 is Ownable2Step, ReentrancyGuard, EIP712, IOracleAttesta
             v += FPM.mulWad(held[i], p[i]);
             total += FPM.mulWadUp(uint256(m.q[i] + int256(m.sets)), p[i]);
         }
+        v = FPM.min(v, net);
         if (total >= pool) return FPM.fullMulDiv(v, pool, total);
         return (v * (base - pool) + net * (pool - total)) / (base - total);
     }
