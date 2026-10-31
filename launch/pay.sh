@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Pays for the Conditionals IMD launch on Robinhood Chain through the Intake (0.5 IMD).
+# Pays for the Conditionals v2 IMD launch on Robinhood Chain through the Intake (0.5 IMD).
 # Usage: launch/pay.sh build <owner> <feeRecipient>   writes launch/launch.json from the template at HEAD
 #        launch/pay.sh approve                         lets the Intake pull 0.5 IMD, once
 #        launch/pay.sh launch                          checks launch/launch.json (free) and pays only if it passes

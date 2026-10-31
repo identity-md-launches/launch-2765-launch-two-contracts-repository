@@ -3,7 +3,7 @@ pragma solidity 0.8.26;
 
 import {Test} from "forge-std/Test.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import {Conditionals} from "../../src/Conditionals.sol";
+import {ConditionalsV2 as Conditionals} from "../../src/ConditionalsV2.sol";
 import {IIntake} from "../../src/interfaces/IIntake.sol";
 import {IOracleAttestation} from "../../src/interfaces/IOracleAttestation.sol";
 import {MockIMD, MockIntake} from "./Mocks.sol";
@@ -29,6 +29,8 @@ abstract contract Fixture is Test {
     string internal constant OUTCOME = "ETH closes above 5000 USD on Coinbase on 2026-12-01";
     string internal constant RULES = "Use congress.gov for the law and the Coinbase ETH-USD daily close for the price.";
 
+    uint256 internal constant B = 20 ether;
+
     uint64 internal closeTime;
     uint64 internal resolveTime;
 
@@ -52,12 +54,12 @@ abstract contract Fixture is Test {
 
     function _create() internal returns (uint256 id) {
         vm.prank(creator);
-        id = c.createMarket(CONDITION, OUTCOME, RULES, closeTime, resolveTime, 1 ether);
+        id = c.createMarket(CONDITION, OUTCOME, RULES, closeTime, resolveTime, 1 ether, B);
     }
 
-    function _stake(address who, uint256 id, uint8 world, uint8 side, uint256 amount) internal {
+    function _stake(address who, uint256 id, uint8 world, uint8 side, uint256 amount) internal returns (uint256) {
         vm.prank(who);
-        c.stake(id, world, side, amount);
+        return c.stakeConditional(id, world, side, amount, 0);
     }
 
     struct AskRef {
@@ -70,7 +72,7 @@ abstract contract Fixture is Test {
     function _request(uint256 id) internal returns (AskRef[] memory refs) {
         if (block.timestamp < resolveTime) vm.warp(resolveTime);
         uint256 before = intake.count();
-        uint256 windowBlock = block.number - c.WINDOW_DEPTH();
+        uint256 windowBlock = block.number - 10;
         bool[2] memory wanted = [c.askable(id, 0), c.askable(id, 1)];
         c.requestResolution(id);
         uint256 n = intake.count() - before;

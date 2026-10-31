@@ -5,7 +5,7 @@ import {Test} from "forge-std/Test.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 import {SignatureChecker} from "@openzeppelin/contracts/utils/cryptography/SignatureChecker.sol";
-import {Conditionals} from "../src/Conditionals.sol";
+import {ConditionalsV2 as Conditionals} from "../src/ConditionalsV2.sol";
 import {IIntake} from "../src/interfaces/IIntake.sol";
 import {IOracleAttestation} from "../src/interfaces/IOracleAttestation.sol";
 import {MockIMD, MockIntake} from "./utils/Mocks.sol";
@@ -45,7 +45,7 @@ contract OracleConformanceTest is Test {
         imd = new MockIMD();
         intake = new MockIntake();
         deployCodeTo(
-            "Conditionals.sol:Conditionals",
+            "ConditionalsV2.sol:ConditionalsV2",
             abi.encode(owner, IERC20(address(imd)), IIntake(address(intake)), SIGNER, feeRecipient),
             VECTOR_CONSUMER
         );
@@ -112,10 +112,11 @@ contract OracleConformanceTest is Test {
             "Use congress.gov for the law and the Coinbase ETH-USD daily close for the price.",
             closeTime,
             resolveTime,
-            1 ether
+            1 ether,
+            1.44 ether
         );
         vm.warp(resolveTime);
-        uint256 windowBlock = block.number - c.WINDOW_DEPTH();
+        uint256 windowBlock = block.number - 10;
         assertEq(c.requestResolution(id), 2);
         bytes32 requestId = intake.requestIds(0);
 

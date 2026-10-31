@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.26;
 
-import {Conditionals} from "../src/Conditionals.sol";
+import {ConditionalsV2 as Conditionals} from "../src/ConditionalsV2.sol";
 import {Fixture} from "./utils/Fixture.sol";
 import {OracleQuestion, OracleAttestationCodes} from "./utils/OracleQuestion.sol";
 import {Strings} from "@openzeppelin/contracts/utils/Strings.sol";
@@ -39,7 +39,7 @@ contract ConditionalsQuestionTest is Fixture {
             "Use the official FOMC statements on federalreserve.gov and the Coinbase BTC-USD daily close (UTC).",
             uint64(1_760_000_100),
             uint64(1_760_000_200),
-            1 ether
+            1 ether, B
         );
         assertEq(address(c), 0xF62849F9A0B5Bf2913b396098F7c7019b51A820a, "fixture address is part of the vector");
         bytes32 expected = 0xf02559bba7566c41440ea2c04c9c9f56372c3f5dc2288352f3e84d364fa8da7e;
@@ -55,13 +55,13 @@ contract ConditionalsQuestionTest is Fixture {
         uint32 windowBlock,
         uint32 resolveIn
     ) public {
-        string memory condition = _text(conditionSeed, c.MAX_CONDITION_LENGTH(), false);
-        string memory outcome = _text(outcomeSeed, c.MAX_OUTCOME_LENGTH(), false);
-        string memory rules = _text(rulesSeed, c.MAX_RULES_LENGTH(), true);
+        string memory condition = _text(conditionSeed, 280, false);
+        string memory outcome = _text(outcomeSeed, 280, false);
+        string memory rules = _text(rulesSeed, 500, true);
         uint64 close = uint64(block.timestamp + 1);
         uint64 resolve = uint64(close + bound(resolveIn, 0, 700 days));
         vm.prank(creator);
-        uint256 id = c.createMarket(condition, outcome, rules, close, resolve, 1 ether);
+        uint256 id = c.createMarket(condition, outcome, rules, close, resolve, 1 ether, B);
 
         for (uint8 q; q < 2; ++q) {
             bytes memory expectedDoc = OracleQuestion.document(_reference(id, q, windowBlock));
@@ -71,10 +71,13 @@ contract ConditionalsQuestionTest is Fixture {
 
     /// forge-config: default.fuzz.runs = 256
     function testFuzz_bodyCarriesTheDocumentAndThePanelTerms(bytes memory outcomeSeed, uint32 windowBlock) public {
-        string memory outcome = _text(outcomeSeed, c.MAX_OUTCOME_LENGTH(), false);
+        string memory outcome = _text(outcomeSeed, 280, false);
         vm.prank(creator);
-        uint256 id = c.createMarket(CONDITION, outcome, RULES, closeTime, resolveTime, 1 ether);
-        string memory body = c.requestBody(id, 1, windowBlock);
+        uint256 id = c.createMarket(CONDITION, outcome, RULES, closeTime, resolveTime, 1 ether, B);
+        vm.roll(uint256(windowBlock) + 10);
+        vm.warp(resolveTime);
+        c.requestResolution(id);
+        string memory body = string(intake.bodyOf(intake.requestIds(1)));
         assertLe(bytes(body).length, 16 * 1024, "body above the Intake's 16 KiB");
 
         OracleQuestion.Question memory q = _reference(id, 1, windowBlock);
@@ -100,7 +103,7 @@ contract ConditionalsQuestionTest is Fixture {
     ///      written by `JSON.stringify` as it is, and anything that would need an escape (or is not ASCII) is refused.
     /// forge-config: default.fuzz.runs = 1000
     function testFuzz_acceptedTextNeedsNoEscaping(bytes memory raw) public {
-        if (raw.length > c.MAX_CONDITION_LENGTH()) {
+        if (raw.length > 280) {
             assembly ("memory-safe") { mstore(raw, 280) }
         }
         bool plain = raw.length > 0;
@@ -110,7 +113,7 @@ contract ConditionalsQuestionTest is Fixture {
         }
         vm.prank(creator);
         if (!plain) vm.expectRevert(Conditionals.InvalidText.selector);
-        c.createMarket(string(raw), OUTCOME, RULES, closeTime, resolveTime, 1 ether);
+        c.createMarket(string(raw), OUTCOME, RULES, closeTime, resolveTime, 1 ether, B);
         if (plain) assertEq(OracleQuestion.jsonString(string(raw)), bytes.concat('"', raw, '"'));
     }
 
