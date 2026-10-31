@@ -2,10 +2,10 @@
 
 import Link from "next/link";
 
-import { FlameIcon, Logo, OracleIcon } from "./Glyphs";
+import { Logo } from "./Glyphs";
 import { useMarkets } from "./Providers";
-import { ADDRESSES, LINKS, LIVE, RULES } from "@/lib/config";
-import { fmtImd, short } from "@/lib/format";
+import { ADDRESSES, LINKS } from "@/lib/config";
+import { short } from "@/lib/format";
 
 const STEPS = [
   {
@@ -51,16 +51,13 @@ export function HowItWorks() {
         ))}
       </div>
 
-      <div className="mt-6 grid gap-4 lg:grid-cols-3">
-        <div className="panel p-7 lg:col-span-2">
-          <p className="eyebrow">Why two worlds</p>
-          <p className="mt-4 text-lg leading-relaxed text-ink-2">
-            Traders are right about an asset and still lose when the world changes under them. A conditional lets you take
-            exactly the risk you mean: <span className="text-sun">long ETH if the bill passes</span>, with nothing at stake
-            if it doesn&apos;t. Side by side, the two worlds also tell everyone else what the crowd thinks the event will do.
-          </p>
-        </div>
-        <FeeSplit />
+      <div className="panel mt-6 p-7">
+        <p className="eyebrow">Why two worlds</p>
+        <p className="mt-4 text-lg leading-relaxed text-ink-2">
+          Traders are right about an asset and still lose when the world changes under them. A conditional lets you take
+          exactly the risk you mean: <span className="text-sun">long ETH if the bill passes</span>, with nothing at stake
+          if it doesn&apos;t. Side by side, the two worlds also tell everyone else what the crowd thinks the event will do.
+        </p>
       </div>
     </section>
   );
@@ -81,92 +78,43 @@ function StepGlyph({ i }: { i: number }) {
   );
 }
 
-function FeeSplit() {
-  return (
-    <div className="panel relative overflow-hidden p-7">
-      <div className="pointer-events-none absolute -right-16 -top-16 h-56 w-56 rounded-full bg-burn/15 blur-3xl" />
-      <p className="eyebrow">The fee</p>
-      <p className="mt-3 font-display text-6xl">3%</p>
-      <p className="text-sm text-mute">of the winning world&apos;s pot, at settlement</p>
-      <div className="mt-6 flex h-2.5 overflow-hidden rounded-full">
-        <div className="w-2/3 bg-gradient-to-r from-burn to-sun-2" />
-        <div className="w-1/3 bg-ink/70" />
-      </div>
-      <div className="mt-4 space-y-2 text-sm">
-        <p className="flex items-center justify-between">
-          <span className="flex items-center gap-2 text-ink-2">
-            <FlameIcon className="h-4 w-4 text-burn" /> Burned forever
-          </span>
-          <span className="num">2%</span>
-        </p>
-        <p className="flex items-center justify-between">
-          <span className="flex items-center gap-2 text-ink-2">
-            <span className="h-2 w-2 rounded-full bg-ink/70" /> Builder and platform
-          </span>
-          <span className="num">1%</span>
-        </p>
-        <p className="pt-2 text-xs text-mute">No fee on refunds, voids or one-sided worlds.</p>
-      </div>
-    </div>
-  );
-}
+const COIN_CARDS = [
+  {
+    dot: "bg-sun shadow-[0_0_16px_#FFB547]",
+    title: "Use what you hold",
+    body: "Bet with ETH or stablecoins straight from your wallet. There's nothing to buy first.",
+  },
+  {
+    dot: "bg-moon shadow-[0_0_16px_#7DE3FF]",
+    title: "Routed automatically",
+    body: "Your coin is swapped into IMD in the same transaction as your bet, with a price limit you can see before you confirm.",
+  },
+  {
+    dot: "bg-ink shadow-[0_0_16px_#F3EFE7]",
+    title: "Settled in IMD",
+    body: "Every market runs on IMD underneath, so pots, refunds and payouts are all paid in IMD.",
+  },
+];
 
-export function ImdSection() {
-  const { totals } = useMarkets();
-  const cards = [
-    {
-      icon: <OracleIcon className="h-6 w-6 text-moon" />,
-      title: "Two oracle questions per market",
-      body: "Every market buys oracle.request twice through IMD's Intake, paid by the contract. Answers are verified onchain against the question it pinned.",
-      stat: `${Math.round(totals.oracleSpend / RULES.oraclePrice)} asked`,
-    },
-    {
-      icon: <FlameIcon className="h-6 w-6 text-burn" />,
-      title: "IMD burned on every settlement",
-      body: "2% of each settled pot is sent to the dead address. More markets, more burn.",
-      stat: `${fmtImd(totals.burned)} IMD burned`,
-    },
-    {
-      icon: <span className="block h-3 w-3 rounded-full bg-sun shadow-[0_0_16px_#FFB547]" />,
-      title: "IMD is the only currency",
-      body: "Stakes, payouts, the creation deposit and oracle payments are all IMD on Robinhood Chain.",
-      stat: `${fmtImd(totals.staked)} IMD staked`,
-    },
-    {
-      icon: <Logo size={22} />,
-      title: "Built and audited by the swarm",
-      body: "The contract was launched through the IMD protocol: imported, audited and deployed by IMD's agents.",
-      stat: LIVE ? "Live on Robinhood Chain" : "Launching on Robinhood Chain",
-    },
-  ];
+export function AnyCoinSection() {
   return (
-    <section id="imd" className="mx-auto mt-32 max-w-7xl scroll-mt-20 px-4 sm:mt-44 sm:px-6">
+    <section id="coins" className="mx-auto mt-32 max-w-7xl scroll-mt-20 px-4 sm:mt-44 sm:px-6">
       <div className="grid gap-10 lg:grid-cols-[1fr_1.4fr]">
         <div>
-          <p className="eyebrow">Built on IMD</p>
+          <p className="eyebrow">Any coin</p>
           <h2 className="mt-3 font-display text-5xl leading-[1.02] sm:text-6xl">
-            Every market is <em className="text-moon-grad">demand for the oracle.</em>
+            Bet with any coin. <em className="text-moon-grad">It all routes to IMD.</em>
           </h2>
-          <p className="mt-5 max-w-md text-ink-2">
-            Conditionals is a paying customer of IMD&apos;s swarm: it creates the oracle demand IMD needs, uses IMD for every
-            trade and removes IMD from supply as it settles.
-          </p>
-          <div className="mt-8 flex flex-wrap gap-2">
-            <a href={LINKS.imd} target="_blank" rel="noreferrer" className="btn btn-ghost text-sm">
-              imd.fun ↗
-            </a>
-            <a href={LINKS.docs} target="_blank" rel="noreferrer" className="btn btn-ghost text-sm">
-              Oracle docs ↗
-            </a>
+          <div className="mt-6">
+            <span className="chip">Coming with v2</span>
           </div>
         </div>
-        <div className="grid gap-4 sm:grid-cols-2">
-          {cards.map((c) => (
-            <div key={c.title} className="panel flex flex-col p-6">
-              {c.icon}
-              <h3 className="mt-6 text-lg">{c.title}</h3>
-              <p className="mt-2 flex-1 text-sm leading-relaxed text-ink-2">{c.body}</p>
-              <p className="num mt-5 text-xs text-mute">{c.stat}</p>
+        <div className="grid gap-4">
+          {COIN_CARDS.map((c) => (
+            <div key={c.title} className="panel p-6">
+              <span className={`block h-3 w-3 rounded-full ${c.dot}`} />
+              <h3 className="mt-5 text-lg">{c.title}</h3>
+              <p className="mt-2 text-sm leading-relaxed text-ink-2">{c.body}</p>
             </div>
           ))}
         </div>
@@ -205,9 +153,6 @@ export function Footer() {
           </a>
           <a href={LINKS.imd} target="_blank" rel="noreferrer" className="hover:text-ink">
             IMD
-          </a>
-          <a href={LINKS.hackathon} target="_blank" rel="noreferrer" className="hover:text-ink">
-            IMD Hackathon
           </a>
         </div>
       </div>

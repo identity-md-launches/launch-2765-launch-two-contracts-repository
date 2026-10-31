@@ -38,8 +38,8 @@ export function Header({ onCreate }: { onCreate: () => void }) {
           <a href="#how" className="transition hover:text-ink">
             How it works
           </a>
-          <a href="#imd" className="transition hover:text-ink">
-            IMD
+          <a href="#coins" className="transition hover:text-ink">
+            Any coin
           </a>
           <Link href="/docs" className="transition hover:text-ink">
             Docs

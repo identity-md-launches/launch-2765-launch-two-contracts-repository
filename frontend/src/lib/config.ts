@@ -29,9 +29,7 @@ export const LIVE = Boolean(ADDRESSES.conditionals);
 
 export const LINKS = {
   imd: "https://imd.fun",
-  docs: "https://imd.fun/docs/#oracle-body",
   oracle: "https://explorer.imd.fun",
-  hackathon: "https://www.imdradar.site/hackathon",
   x: process.env.NEXT_PUBLIC_X_URL ?? "https://x.com/",
   github: process.env.NEXT_PUBLIC_GITHUB_URL ?? "https://github.com/UgwujaGeorge/conditionals",
   explorer: chain.blockExplorers.default.url,
